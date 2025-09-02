@@ -1,4 +1,4 @@
-# Simple Docker Runtime
+# Simple Linux Docker Runtime
 
 基于 OpenHands 的 runtime 代码创建的 Docker 容器，提供 FastAPI 接口来执行 Bash 命令与插件功能。
 
@@ -40,10 +40,10 @@
 cd simple_openhands
 
 # 给脚本执行权限
-chmod +x deploy_and_start.sh
+chmod +x deploy.sh
 
 # 运行部署脚本
-./deploy_and_start.sh
+./deploy.sh
 ```
 
 #### 方式二：手动部署

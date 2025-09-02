@@ -18,8 +18,7 @@ from simple_openhands.events.observation import (
 from simple_openhands.events.observation.commands import CMD_OUTPUT_PS1_END
 
 from simple_openhands.core import logger
-
-TIMEOUT_MESSAGE_TEMPLATE = "Command timed out after {timeout} seconds"
+from simple_openhands.bash_constants import TIMEOUT_MESSAGE_TEMPLATE
 
 def should_continue() -> bool:
     """Simple helper function to check if execution should continue."""

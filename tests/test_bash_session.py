@@ -5,8 +5,7 @@ import time
 from simple_openhands.core import logger
 from simple_openhands.events.action import CmdRunAction
 from simple_openhands.bash import BashCommandStatus, BashSession
-
-TIMEOUT_MESSAGE_TEMPLATE = "Command timed out after {timeout} seconds"
+from simple_openhands.bash_constants import TIMEOUT_MESSAGE_TEMPLATE
 
 def get_no_change_timeout_suffix(timeout_seconds):
     """Helper function to generate the expected no-change timeout suffix."""

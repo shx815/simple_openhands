@@ -12,15 +12,14 @@ from threading import RLock
 
 import pythonnet
 
-from simple_openhands.core.logger import openhands_logger as logger
+from simple_openhands.core.logger import simple_openhands_logger as logger
 from simple_openhands.events.action import CmdRunAction
 from simple_openhands.events.observation import ErrorObservation
 from simple_openhands.events.observation.commands import (
     CmdOutputMetadata,
     CmdOutputObservation,
 )
-# 定义超时消息模板（因为原OpenHands的bash_constants不在你的项目中）
-TIMEOUT_MESSAGE_TEMPLATE = "Command timed out after {timeout} seconds"
+from simple_openhands.bash_constants import TIMEOUT_MESSAGE_TEMPLATE
 
 # 定义Windows异常类（因为原OpenHands的windows_exceptions不在你的项目中）
 class DotNetMissingError(Exception):
@@ -60,37 +59,68 @@ except Exception as coreclr_ex:
 
 # Attempt to load the PowerShell SDK assembly only if clr and System loaded
 ps_sdk_path = None
+powershell_sdk_loaded = False
+
 try:
-    # Prioritize PowerShell 7+ if available (adjust path if necessary)
+    # PowerShell SDK detection - Multiple strategies based on GitHub issue #10355
+    potential_paths = []
+    
+    # Strategy 1: PowerShell 7+ (installed via Chocolatey in container)
+    pwsh7_choco_path = Path('C:\\Program Files\\PowerShell\\7\\System.Management.Automation.dll')
+    potential_paths.append(('PowerShell 7 (Chocolatey)', pwsh7_choco_path))
+    
+    # Strategy 2: PowerShell 7+ (standard installation)
     pwsh7_path = (
         Path(os.environ.get('ProgramFiles', 'C:\\Program Files'))
         / 'PowerShell'
         / '7'
         / 'System.Management.Automation.dll'
     )
-    if pwsh7_path.exists():
-        ps_sdk_path = str(pwsh7_path)
-        clr.AddReference(ps_sdk_path)
-        logger.info(f'Loaded PowerShell SDK (Core): {ps_sdk_path}')
-    else:
-        # Fallback to Windows PowerShell 5.1 bundled with Windows
-        winps_path = (
-            Path(os.environ.get('SystemRoot', 'C:\\Windows'))
-            / 'System32'
-            / 'WindowsPowerShell'
-            / 'v1.0'
-            / 'System.Management.Automation.dll'
-        )
-        if winps_path.exists():
-            ps_sdk_path = str(winps_path)
-            clr.AddReference(ps_sdk_path)
-            logger.debug(f'Loaded PowerShell SDK (Desktop): {ps_sdk_path}')
-        else:
-            # Last resort: try loading by assembly name (might work if in GAC or path)
+    potential_paths.append(('PowerShell 7 (Standard)', pwsh7_path))
+    
+    # Strategy 3: PowerShell 7+ (Program Files x86)
+    pwsh7_x86_path = (
+        Path(os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)'))
+        / 'PowerShell'
+        / '7'
+        / 'System.Management.Automation.dll'
+    )
+    potential_paths.append(('PowerShell 7 (x86)', pwsh7_x86_path))
+    
+    # Strategy 4: Windows PowerShell 5.1 (Desktop Edition)
+    winps_path = (
+        Path(os.environ.get('SystemRoot', 'C:\\Windows'))
+        / 'System32'
+        / 'WindowsPowerShell'
+        / 'v1.0'
+        / 'System.Management.Automation.dll'
+    )
+    potential_paths.append(('Windows PowerShell 5.1', winps_path))
+    
+    # Try each path in order of preference
+    for description, path in potential_paths:
+        if path.exists():
+            try:
+                ps_sdk_path = str(path)
+                clr.AddReference(ps_sdk_path)
+                logger.info(f'Successfully loaded PowerShell SDK from {description}: {ps_sdk_path}')
+                powershell_sdk_loaded = True
+                break
+            except Exception as path_ex:
+                logger.warning(f'Failed to load PowerShell SDK from {description} ({path}): {path_ex}')
+                continue
+    
+    # Strategy 5: Last resort - try loading by assembly name (GAC or PATH)
+    if not powershell_sdk_loaded:
+        try:
             clr.AddReference('System.Management.Automation')
-            logger.info(
-                'Attempted to load PowerShell SDK by name (System.Management.Automation)'
-            )
+            logger.info('Successfully loaded PowerShell SDK by assembly name (System.Management.Automation)')
+            powershell_sdk_loaded = True
+        except Exception as name_ex:
+            logger.error(f'Failed to load PowerShell SDK by assembly name: {name_ex}')
+    
+    if not powershell_sdk_loaded:
+        raise Exception('No PowerShell SDK found in any of the expected locations')
 
     from System.Management.Automation import JobState, PowerShell
     from System.Management.Automation.Language import Parser
@@ -100,7 +130,19 @@ try:
     )
 except Exception as e:
     error_msg = 'Failed to load PowerShell SDK components.'
-    details = f'{str(e)} (Path searched: {ps_sdk_path})'
+    # Create detailed error information based on GitHub issue #10355
+    searched_paths = [str(path) for _, path in potential_paths] if 'potential_paths' in locals() else ['Unknown']
+    details = (
+        f'{str(e)}\n'
+        f'Last attempted path: {ps_sdk_path}\n'
+        f'All searched paths: {searched_paths}\n'
+        f'PowerShell SDK loaded: {powershell_sdk_loaded}\n'
+        f'Suggestions:\n'
+        f'1. Ensure PowerShell 7+ is installed (choco install pwsh)\n'
+        f'2. Verify .NET 9 Runtime is available (dotnet --info)\n'
+        f'3. Check if System.Management.Automation.dll exists in expected locations\n'
+        f'4. Reference: https://github.com/All-Hands-AI/OpenHands/issues/10355'
+    )
     logger.error(f'{error_msg} Details: {details}')
     raise DotNetMissingError(error_msg, details)
 
@@ -1308,9 +1350,16 @@ class WindowsPowershellSession:
             # Exit code is already -1 from loop exit reason
 
             # --- Calculate new output/errors relative to last observation (using latest from loop) ---
-            final_output_content = latest_cumulative_output.removeprefix(
-                self._last_job_output
-            )
+            # For timeout cases, we want to show all output that was accumulated during monitoring
+            if self._last_job_output == '':
+                # First timeout - show all accumulated output
+                final_output_content = latest_cumulative_output
+            else:
+                # Subsequent timeouts - show only new output since last observation
+                final_output_content = latest_cumulative_output.removeprefix(
+                    self._last_job_output
+                )
+            
             final_error_content = [
                 e for e in latest_cumulative_errors if e not in self._last_job_error
             ]
@@ -1408,15 +1457,23 @@ class WindowsPowershellSession:
         if hasattr(self, 'runspace') and self.runspace:
             try:
                 # Check state using System.Management.Automation.Runspaces namespace
-                # Get the state info object first to avoid potential pythonnet issues with nested access
-                runspace_state_info = self.runspace.RunspaceStateInfo
-                if runspace_state_info.State == RunspaceState.Opened:
-                    self.runspace.Close()
+                # Handle pythonnet property access carefully
+                try:
+                    if self.runspace.RunspaceStateInfo.State == RunspaceState.Opened:
+                        self.runspace.Close()
+                except (AttributeError, TypeError):
+                    # If state check fails, try to close anyway (runspace might still be valid)
+                    try:
+                        self.runspace.Close()
+                    except Exception:
+                        pass  # Ignore close errors if runspace is already closed
+                
                 self.runspace.Dispose()
                 logger.info('PowerShell runspace closed and disposed.')
             except Exception as e:
                 logger.error(f'Error closing/disposing PowerShell runspace: {e}')
-                logger.error(traceback.format_exc())
+                # Don't log full traceback for common shutdown issues
+                logger.debug(traceback.format_exc())
 
         self.runspace = None
         self._initialized = False

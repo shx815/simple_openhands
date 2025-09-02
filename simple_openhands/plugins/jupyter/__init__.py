@@ -45,6 +45,10 @@ class JupyterPlugin(Plugin):
 
         if not is_local_runtime:
             # Non-LocalRuntime: 直接以当前用户运行，在 micromamba env + poetry venv 中启动
+            if is_windows:
+                code_repo_path = 'C:\\simple_openhands\\code'  # Windows container path
+            else:
+                code_repo_path = '/simple_openhands/code'  # Unix container path
             poetry_prefix = (
                         'cd /simple_openhands/code\n'
         'export POETRY_VIRTUALENVS_PATH=/simple_openhands/poetry;\n'
@@ -66,16 +70,22 @@ class JupyterPlugin(Plugin):
 
         if is_windows:
             # Windows-specific command format
-            jupyter_launch_command = (
-                f'cd /d "{code_repo_path}" && '
-                'jupyter server '
-                '--ServerApp.ip=0.0.0.0 '
-                f'--ServerApp.port={self.kernel_gateway_port} '
-                '--ServerApp.token="" '
-                '--ServerApp.password="" '
-                '--ServerApp.disable_check_xsrf=True '
-                '--ServerApp.allow_origin="*"'
-            )
+            if not is_local_runtime:
+                # For non-local runtime, use the same approach as OpenHands official implementation
+                jupyter_launch_command = (
+                    f'cd /d "{code_repo_path}" && '
+                    f'"{sys.executable}" -m jupyter kernelgateway '
+                    '--KernelGatewayApp.ip=0.0.0.0 '
+                    f'--KernelGatewayApp.port={self.kernel_gateway_port}'
+                )
+            else:
+                # For local runtime, use the same approach as OpenHands official implementation
+                jupyter_launch_command = (
+                    f'cd /d "{code_repo_path}" && '
+                    f'"{sys.executable}" -m jupyter kernelgateway '
+                    '--KernelGatewayApp.ip=0.0.0.0 '
+                    f'--KernelGatewayApp.port={self.kernel_gateway_port}'
+                )
             logger.debug(f'Jupyter launch command (Windows): {jupyter_launch_command}')
 
             # Using synchronous subprocess.Popen for Windows as asyncio.create_subprocess_shell
@@ -86,27 +96,53 @@ class JupyterPlugin(Plugin):
                 stderr=subprocess.STDOUT,
                 shell=True,
                 text=True,
+                bufsize=0,  # 无缓冲
+                universal_newlines=True,
             )
 
-            # Windows-specific stdout handling with synchronous time.sleep
-            # as asyncio has limitations on Windows for subprocess operations
+            # Windows-specific stdout handling with timeout and proper detection
             output = ''
-            while should_continue():
+            max_wait_time = 60  # 最多等待60秒
+            start_time = time.time()
+            
+            while should_continue() and (time.time() - start_time) < max_wait_time:
                 if self.gateway_process.stdout is None:
-                    time.sleep(1)  # type: ignore[ASYNC101] # noqa: ASYNC101
+                    time.sleep(0.5)
                     continue
 
                 line = self.gateway_process.stdout.readline()
                 if not line:
-                    time.sleep(1)  # type: ignore[ASYNC101] # noqa: ASYNC101
+                    time.sleep(0.5)
                     continue
 
                 output += line
+                logger.debug(f'Jupyter output: {line.strip()}')
+                
+                # Use OpenHands' simple detection approach
                 if 'at' in line:
+                    logger.info(f'Jupyter kernel gateway started successfully, detected: {line.strip()}')
                     break
 
-                time.sleep(1)  # type: ignore[ASYNC101] # noqa: ASYNC101
-                logger.debug('Waiting for jupyter kernel gateway to start...')
+                # 减少sleep时间，加快检测速度
+                time.sleep(0.1)
+            
+            # 检查是否超时
+            if (time.time() - start_time) >= max_wait_time:
+                logger.warning(f'Jupyter server startup timed out after {max_wait_time} seconds')
+                logger.warning(f'Captured output so far: {output}')
+                # 尝试直接连接端口验证服务是否真的启动了
+                import socket
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    result = sock.connect_ex(('127.0.0.1', self.kernel_gateway_port))
+                    sock.close()
+                    if result == 0:
+                        logger.info(f'Jupyter server is actually running on port {self.kernel_gateway_port}, output detection failed but port is accessible')
+                    else:
+                        logger.error(f'Jupyter server is not running on port {self.kernel_gateway_port}')
+                except Exception as e:
+                    logger.error(f'Failed to check port {self.kernel_gateway_port}: {e}')
+                # 继续执行，不要因为超时而失败
 
             logger.debug(
                 f'Jupyter kernel gateway started at port {self.kernel_gateway_port}. Output: {output}'

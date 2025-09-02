@@ -25,8 +25,9 @@ if sys.platform == 'win32':
     try:
         from simple_openhands.windows_bash import WindowsPowershellSession
         BashSession = WindowsPowershellSession
-    except ImportError as e:
+    except Exception as e:
         print(f"Warning: Windows PowerShell not available: {e}")
+        print("Service will start without command execution functionality")
         BashSession = None
 else:
     from simple_openhands.bash import BashSession

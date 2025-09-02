@@ -1,124 +1,87 @@
 # Dockerfile.windows
-# Windows容器版本，使用micromamba+poetry管理环境
+# Windows容器版本，使用chocolatey + Python + poetry管理环境
 
 FROM mcr.microsoft.com/windows/servercore:ltsc2022
 
-# 设置元数据
-LABEL maintainer="your-email@example.com"
-LABEL description="Simple OpenHands Runtime for Windows with micromamba+poetry"
-
 # 设置环境变量
-ENV PYTHON_VERSION=3.12.0
-ENV PYTHON_HOME=C:\\Python312
-ENV PATH=C:\\Python312;C:\\Python312\\Scripts;%PATH%
-ENV POETRY_VIRTUALENVS_PATH=C:\\simple_openhands\\poetry
-ENV MAMBA_ROOT_PREFIX=C:\\simple_openhands\\micromamba
-ENV LANG=en_US.UTF-8
-ENV LC_ALL=en_US.UTF-8
-ENV EDITOR=code
-ENV VISUAL=code
-ENV GIT_EDITOR="code --wait"
-ENV OPENVSCODE_SERVER_ROOT=C:\\simple_openhands\\.openvscode-server
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV WORK_DIR=C:\\simple_openhands\\workspace
-ENV HOST=0.0.0.0
-ENV PORT=8000
-ENV USERNAME=appuser
-ENV VSCODE_PORT=3000
-ENV JUPYTER_PORT=8001
+ENV POETRY_VIRTUALENVS_PATH=C:\\simple_openhands\\poetry \
+    PYTHON_ROOT=C:\\Python312 \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    EDITOR=code \
+    VISUAL=code \
+    GIT_EDITOR="code --wait" \
+    OPENVSCODE_SERVER_ROOT=C:\\simple_openhands\\.openvscode-server \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    WORK_DIR=C:\\simple_openhands\\workspace \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    VSCODE_PORT=3000 \
+    JUPYTER_PORT=8001
 
-# 安装基础系统依赖
-RUN powershell -Command \
+# 安装Chocolatey并批量安装所有必需工具
+RUN powershell -Command " \
+    # 安装Chocolatey \
     Set-ExecutionPolicy Bypass -Scope Process -Force; \
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; \
     iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1')); \
-    choco install -y python git curl wget 7zip
+    \
+    # 设置环境变量 \
+    $env:ChocolateyInstall = \"$($env:ALLUSERSPROFILE)\\chocolatey\"; \
+    $env:PATH = \"$env:ChocolateyInstall\\bin;$env:PATH\"; \
+    \
+    # 批量安装所有工具 \
+    Write-Host 'Installing all required tools...'; \
+    choco install git curl wget 7zip python312 vcredist-all -y --limit-output --no-progress --force; \
+    \
+    # 安装PowerShell 7（指定版本） \
+    Write-Host 'Installing PowerShell 7...'; \
+    choco install powershell-core --version=7.5.2 -y --limit-output --no-progress --force; \
+    \
+    # 安装.NET 9 Runtime \
+    Write-Host 'Installing .NET 9 Runtime...'; \
+    choco install dotnet-runtime --version=9.0.0 -y --limit-output --no-progress --force; \
+    \
+    Write-Host 'All tools installed successfully'"
 
-# 安装Python 3.12
-RUN powershell -Command \
-    Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe" -OutFile "python-installer.exe"; \
-    Start-Process -FilePath "python-installer.exe" -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1" -Wait; \
-    Remove-Item "python-installer.exe"
-
-# 创建必要的目录
-RUN mkdir C:\\simple_openhands && \
-    mkdir C:\\simple_openhands\\logs && \
-    mkdir C:\\simple_openhands\\poetry && \
-    mkdir C:\\simple_openhands\\micromamba && \
-    mkdir C:\\simple_openhands\\code && \
-    mkdir C:\\simple_openhands\\workspace
-
-# 安装micromamba
-RUN powershell -Command \
-    Invoke-WebRequest -Uri "https://micro.mamba.pm/api/micromamba/win-64/latest" -OutFile "micromamba.tar.bz2"; \
-    7z x "micromamba.tar.bz2" -o"C:\\simple_openhands\\micromamba\\bin" -y; \
-    Remove-Item "micromamba.tar.bz2"; \
-    C:\\simple_openhands\\micromamba\\bin\\micromamba.exe config remove channels defaults; \
-    C:\\simple_openhands\\micromamba\\bin\\micromamba.exe config list
-
-# 创建simple_openhands虚拟环境并安装poetry和python
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe create -n simple_openhands -y && \
-    C:\\simple_openhands\\micromamba\\bin\\micromamba.exe install -n simple_openhands -c conda-forge poetry python=3.12 -y
-
-# 配置micromamba和poetry
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe config set changeps1 False && \
-    C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry config virtualenvs.path C:\\simple_openhands\\poetry
-
-# 复制Poetry配置文件
-COPY pyproject.toml C:\\simple_openhands\\code\\
+# 创建目录结构、安装Python依赖并配置环境
+RUN pwsh -Command " \
+    # 创建目录结构 \
+    New-Item -ItemType Directory -Path C:\\simple_openhands\\poetry, C:\\simple_openhands\\code, C:\\simple_openhands\\workspace -Force; \
+    \
+    # 设置目录权限 \
+    icacls 'C:\\simple_openhands' /grant 'ContainerUser:(OI)(CI)F' /T; \
+    icacls 'C:\\simple_openhands\\workspace' /grant 'Everyone:(OI)(CI)F' /T; \
+    icacls 'C:\\simple_openhands\\code' /grant 'Everyone:(OI)(CI)F' /T; \
+    \
+    # 安装Poetry和pythonnet \
+    python -m pip install --upgrade pip poetry pythonnet; \
+    \
+    # 配置Poetry \
+    python -m poetry config virtualenvs.path 'C:\\simple_openhands\\poetry'; \
+    python -m poetry config virtualenvs.create true; \
+    python -m poetry config virtualenvs.in-project false"
 
 # 设置工作目录
 WORKDIR C:\\simple_openhands\\code
 
-# 设置Python路径
+# 设置PYTHONPATH环境变量
 ENV PYTHONPATH=C:\\simple_openhands\\code;C:\\simple_openhands\\code\\simple_openhands
 
-# 安装依赖（所有依赖都在主依赖中）
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry install --no-interaction --no-root
+# 复制Poetry配置并安装依赖（利用Docker缓存）
+COPY pyproject.toml .
+RUN pwsh -Command "python -m poetry install --no-interaction --no-root"
 
 # 复制应用代码
-RUN mkdir C:\\simple_openhands\\code\\simple_openhands && \
-    echo. > C:\\simple_openhands\\code\\simple_openhands\\__init__.py
-COPY simple_openhands/ C:\\simple_openhands\\code\\simple_openhands\\
-COPY tests/ C:\\simple_openhands\\code\\tests\\
+COPY simple_openhands simple_openhands
+COPY tests tests
 
-# 清理缓存
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry cache clear --all . -n && \
-    C:\\simple_openhands\\micromamba\\bin\\micromamba.exe clean --all
-
-# 测试Poetry安装
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry --version
-
-# 设置Poetry虚拟环境的PATH
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry env info --path > C:\\temp\\poetry_env_path.txt && \
-    set /p POETRY_ENV_PATH=<C:\\temp\\poetry_env_path.txt && \
-    echo "set PATH=%POETRY_ENV_PATH%\\Scripts;%PATH%" >> C:\\simple_openhands\\env.bat && \
-    del C:\\temp\\poetry_env_path.txt
-
-# 设置环境变量和权限
-RUN C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry run python -c "import sys; print('OH_INTERPRETER_PATH=' + sys.executable)" >> C:\\simple_openhands\\env.bat
-
-# 创建用户（Windows容器中用户管理方式不同）
-RUN powershell -Command \
-    $password = ConvertTo-SecureString "Password123!" -AsPlainText -Force; \
-    New-LocalUser -Name "appuser" -Password $password -FullName "Application User" -Description "User for running applications"; \
-    Add-LocalGroupMember -Group "Administrators" -Member "appuser"
-
-# 设置文件权限
-RUN icacls "C:\\simple_openhands" /grant "appuser:(OI)(CI)F" /T && \
-    icacls "C:\\simple_openhands\\workspace" /grant "appuser:(OI)(CI)F" /T && \
-    icacls "C:\\simple_openhands\\code" /grant "appuser:(OI)(CI)F" /T
-
-# 切换到用户
-USER appuser
+# 使用Windows容器的默认用户
+USER ContainerUser
 
 # 暴露端口
 EXPOSE 8000 3000 8001
 
-# 健康检查（Windows容器使用PowerShell）
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD powershell -Command "try { Invoke-WebRequest -Uri 'http://localhost:8000/alive' -UseBasicParsing | Out-Null; exit 0 } catch { exit 1 }"
-
-# 启动命令（使用PowerShell）
-CMD ["powershell", "-Command", "& { C:\\simple_openhands\\micromamba\\bin\\micromamba.exe run -n simple_openhands poetry run python -m simple_openhands.main }"]
+# 启动命令
+CMD ["pwsh", "-Command", "& { python -m poetry run python -m simple_openhands.main }"]
