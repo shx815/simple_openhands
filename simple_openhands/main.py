@@ -20,6 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from simple_openhands.models import ServerInfo
+from pydantic import BaseModel
+# Git utilities (thin adapter)
+from simple_openhands.utils.git.git_handler import GitHandler, CommandResult
 # 根据平台选择合适的bash实现
 if sys.platform == 'win32':
     try:
@@ -38,12 +41,54 @@ from simple_openhands.utils.file.file_viewer import generate_file_viewer_html
 
 from simple_openhands.plugins import ALL_PLUGINS, JupyterPlugin, VSCodePlugin
 from simple_openhands.events.serialization import event_from_dict, event_to_dict
-from pydantic import BaseModel
 
 # 全局变量
 bash_session: Optional[BashSession] = None
 # 已初始化的插件实例注册表
 PLUGIN_INSTANCES: Dict[str, object] = {}
+
+# ================================
+# Git adapter setup
+# ================================
+
+def _git_execute_shell(cmd: str, cwd: str | None) -> CommandResult:
+    """Execution function for GitHandler using the current bash session.
+
+    Returns a CommandResult with stdout/stderr content and exit_code.
+    """
+    try:
+        if not bash_session:
+            return CommandResult(content='bash_session_not_available', exit_code=-1)
+        # 一些 BashSession 实现对每条命令的 cwd 支持有限，显式前置 cd 更稳妥
+        command = cmd if not cwd else f'cd "{cwd}" && {cmd}'
+        obs = bash_session.execute(CmdRunAction(command=command, cwd=cwd))
+        content = getattr(obs, 'content', '')
+        exit_code = getattr(obs, 'exit_code', 0)
+        return CommandResult(content=content, exit_code=exit_code)
+    except Exception as e:
+        return CommandResult(content=str(e), exit_code=-1)
+
+
+def _git_create_file(path: str, content: str) -> int:
+    """Create file for GitHandler (sync); writes directly via Python IO."""
+    try:
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return 0
+    except Exception:
+        return -1
+
+
+# Single, process-wide GitHandler (cwd is set per-request)
+_git_handler = GitHandler(
+    execute_shell_fn=_git_execute_shell,
+    create_file_fn=_git_create_file,
+)
+
+def _default_work_dir() -> str:
+    return 'C\\simple_openhands\\workspace' if sys.platform == 'win32' else '/simple_openhands/workspace'
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,9 +104,9 @@ async def lifespan(app: FastAPI):
 
     # 根据平台设置工作目录
     if sys.platform == 'win32':
-        work_dir = os.environ.get('WORK_DIR', 'C:\\workspace')
+        work_dir = os.environ.get('WORK_DIR', 'C\\simple_openhands\\workspace')
     else:
-        work_dir = os.environ.get('WORK_DIR', '/workspace')
+        work_dir = os.environ.get('WORK_DIR', '/simple_openhands/workspace')
     
     username = os.environ.get('USERNAME', getpass.getuser())
 
@@ -74,6 +119,23 @@ async def lifespan(app: FastAPI):
         if hasattr(bash_session, 'initialize'):
             bash_session.initialize()
         print(f"Bash session initialized in {work_dir} as user {username}")
+        # 强制将会话目录切换到工作目录，避免不一致
+        try:
+            bash_session.execute(CmdRunAction(command=f'cd {work_dir}', cwd=work_dir, is_static=True, hidden=True))
+        except Exception:
+            pass
+        # 自动初始化Git仓库并设置safe.directory，避免“dubious ownership”问题
+        try:
+            current_cwd = getattr(bash_session, 'cwd', work_dir)
+            # 配置基础git用户信息（幂等）
+            bash_session.execute(CmdRunAction(command='git config --global user.name "simple_openhands"', cwd=current_cwd, is_static=True, hidden=True))
+            bash_session.execute(CmdRunAction(command='git config --global user.email "simple_openhands@example.com"', cwd=current_cwd, is_static=True, hidden=True))
+            # 若非git仓库则初始化（幂等）
+            bash_session.execute(CmdRunAction(command='git rev-parse --is-inside-work-tree || git init', cwd=current_cwd, is_static=True, hidden=True))
+            # 设置safe.directory，避免挂载目录所有权不一致导致的报错（幂等，可重复添加）
+            bash_session.execute(CmdRunAction(command=f'git config --global --add safe.directory "{current_cwd}"', cwd=current_cwd, is_static=True, hidden=True))
+        except Exception as e:
+            print(f"Git auto-setup skipped: {e}")
     except Exception as e:
         print(f"Failed to initialize bash session: {e}")
         bash_session = None
@@ -149,9 +211,9 @@ async def get_server_info():
     """获取服务器信息"""
     # 根据平台设置默认工作目录
     if sys.platform == 'win32':
-        work_dir = os.environ.get('WORK_DIR', 'C:\\workspace')
+        work_dir = os.environ.get('WORK_DIR', 'C\\simple_openhands\\workspace')
     else:
-        work_dir = os.environ.get('WORK_DIR', '/workspace')
+        work_dir = os.environ.get('WORK_DIR', '/simple_openhands/workspace')
     
     username = os.environ.get('USERNAME', getpass.getuser())
 
@@ -176,6 +238,59 @@ async def get_server_info():
         resources=resources
     )
 
+# ================================
+# Git APIs
+# ================================
+
+class GitDiffRequest(BaseModel):
+    file_path: str
+    cwd: str | None = None
+
+
+@app.get("/git/branch")
+async def git_branch(cwd: str | None = None):
+    """Get current git branch (None if detached or not a repo)."""
+    if not bash_session:
+        raise HTTPException(status_code=503, detail="Bash session not available")
+    try:
+        cur_cwd = cwd or getattr(bash_session, 'cwd', None) or _default_work_dir()
+        _git_handler.set_cwd(cur_cwd)
+        branch = _git_handler.get_current_branch()
+        return {"branch": branch}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"git_branch error: {str(e)}")
+
+
+@app.post("/git/changes")
+async def git_changes(cwd: str | None = None):
+    """List git changes in workspace (multi-repo aware)."""
+    if not bash_session:
+        raise HTTPException(status_code=503, detail="Bash session not available")
+    try:
+        cur_cwd = cwd or getattr(bash_session, 'cwd', None) or _default_work_dir()
+        _git_handler.set_cwd(cur_cwd)
+        changes = _git_handler.get_git_changes() or []
+        return {"cwd": cur_cwd, "changes": changes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"git_changes error: {str(e)}")
+
+
+@app.post("/git/diff")
+async def git_diff(body: GitDiffRequest):
+    """Get git diff (original/modified) for a file."""
+    if not bash_session:
+        raise HTTPException(status_code=503, detail="Bash session not available")
+    try:
+        cur_cwd = body.cwd or getattr(bash_session, 'cwd', None) or _default_work_dir()
+        _git_handler.set_cwd(cur_cwd)
+        diff = _git_handler.get_git_diff(body.file_path)
+        return {"cwd": cur_cwd, "file_path": body.file_path, **diff}
+    except ValueError as ve:
+        # pass-through known handler errors
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"git_diff error: {str(e)}")
+
 @app.get("/system/stats")
 async def get_system_stats_api():
     """获取系统统计信息
@@ -197,8 +312,6 @@ async def get_system_stats_api():
 
 
 
-
-
 @app.post("/reset")
 async def reset_session():
     """重置bash session"""
@@ -209,9 +322,9 @@ async def reset_session():
 
     # 根据平台设置工作目录
     if sys.platform == 'win32':
-        work_dir = os.environ.get('WORK_DIR', 'C:\\workspace')
+        work_dir = os.environ.get('WORK_DIR', 'C\\simple_openhands\\workspace')
     else:
-        work_dir = os.environ.get('WORK_DIR', '/workspace')
+        work_dir = os.environ.get('WORK_DIR', '/simple_openhands/workspace')
     
     username = os.environ.get('USERNAME', getpass.getuser())
 
@@ -311,7 +424,7 @@ async def get_vscode_url():
             )
         
         # 构建VSCode URL，使用localhost（容器内访问）
-        vscode_url = f"http://localhost:{port}/?tkn={token}&folder=/workspace"
+        vscode_url = f"http://localhost:{port}/?tkn={token}&folder={_default_work_dir()}"
         
         return {
             "status": "success",
@@ -616,9 +729,9 @@ def main():
 
     # 根据平台设置默认工作目录
     if sys.platform == 'win32':
-        default_work_dir = 'C:\\workspace'
+        default_work_dir = 'C\\simple_openhands\\workspace'
     else:
-        default_work_dir = '/workspace'
+        default_work_dir = '/simple_openhands/workspace'
 
     print(f"Starting Simple Docker Runtime on {host}:{port}")
     print(f"Platform: {'Windows' if sys.platform == 'win32' else 'Linux/Unix'}")

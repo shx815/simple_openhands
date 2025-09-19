@@ -108,7 +108,8 @@ start_container() {
         -p 8000:8000 \
         -p 3000:3000 \
         -p 8001:8001 \
-        -v "$(pwd)/workspace:/workspace" \
+        -v "$(pwd)/workspace:/simple_openhands/workspace" \
+        -e WORK_DIR=/simple_openhands/workspace \
         simple-openhands
     
     if [ $? -eq 0 ]; then

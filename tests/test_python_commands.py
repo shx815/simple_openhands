@@ -28,7 +28,7 @@ def test_basic_commands():
         {
             "name": "pwd",
             "command": "import requests; print(requests.post('http://localhost:8000/execute_action', json={'action': {'action': 'run', 'args': {'command': 'pwd'}}}).json()['content'])",
-            "expected_patterns": ["/workspace", "/tmp", "/app"]
+            "expected_patterns": ["/simple_openhands/workspace", "/tmp", "/app"]
         },
         {
             "name": "whoami",
@@ -70,7 +70,7 @@ def test_python_code():
         {
             "name": "import os",
             "command": "import requests; print(requests.post('http://localhost:8000/execute_action', json={'action': {'action': 'run_ipython', 'args': {'code': 'import os; print(os.getcwd())'}}}).json()['content'])",
-            "expected_patterns": ["/workspace", "/tmp", "/app"]
+            "expected_patterns": ["/simple_openhands/workspace", "/tmp", "/app"]
         }
     ]
     

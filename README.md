@@ -1,5 +1,7 @@
 # Simple Linux Docker Runtime
 
+[Windows 版本说明请点击这里 → README-Windows.md](README-Windows.md)
+
 基于 OpenHands 的 runtime 代码创建的 Docker 容器，提供 FastAPI 接口来执行 Bash 命令与插件功能。
 
 ## 主要功能
@@ -28,6 +30,11 @@
 - **Jupyter 插件**：自动初始化，提供 Python 执行环境
 - **AgentSkills 插件**：立即可用，提供文件操作、搜索、PDF/DOCX/LaTeX/PPTX解析等技能
 - **VSCode 插件**：手动初始化，提供完整的VSCode开发环境（基于OpenVSCode服务器）
+
+#### **6. Git 版本控制与代码差异**
+- 获取当前分支（/git/branch）
+- 获取变更文件列表（/git/changes）
+- 获取单文件原始/修改内容（/git/diff）
 ---
 
 ## 用户使用指南
@@ -57,7 +64,8 @@ docker build -t simple-openhands .
 # 启动容器
 docker run -d --name simple-openhands \
   -p 8000:8000 -p 3000:3000 -p 8001:8001 \
-  -v "$(pwd)/workspace:/workspace" \
+  -v "$(pwd)/workspace:/simple_openhands/workspace" \
+  -e WORK_DIR=/simple_openhands/workspace \
   simple-openhands
 
 # 端口说明：
@@ -92,6 +100,26 @@ curl http://localhost:8000/system/stats
 
 # 重置 bash session
 curl -X POST "http://localhost:8000/reset"
+```
+
+#### Git API
+
+推荐在 Git API 中明确传递 cwd（默认工作区为 /simple_openhands/workspace）
+
+```bash
+# 获取当前分支
+curl http://localhost:8000/git/branch
+
+# 获取工作区变更（指定工作目录）
+curl -X POST "http://localhost:8000/git/changes?cwd=/simple_openhands/workspace"
+
+# 获取单文件差异（指定工作目录）
+curl -X POST "http://localhost:8000/git/diff" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "test.txt",
+    "cwd": "/simple_openhands/workspace"
+  }'
 ```
 
 #### execute_action 统一接口
@@ -208,7 +236,7 @@ curl -X POST "http://localhost:8000/execute_action" \
     "action": {
       "action": "run",
       "args": {
-        "command": "cd /workspace",
+        "command": "cd /simple_openhands/workspace",
         "thought": "切换到工作目录"
       }
     }
@@ -313,7 +341,7 @@ curl -X POST "http://localhost:8000/execute_action" \
     "action": {
       "action": "write",
       "args": {
-        "path": "/workspace/test.txt",
+        "path": "/simple_openhands/workspace/test.txt",
         "content": "这是一个测试文件",
         "thought": "创建测试文件"
       }
@@ -327,7 +355,7 @@ curl -X POST "http://localhost:8000/execute_action" \
     "action": {
       "action": "edit",
       "args": {
-        "path": "/workspace/test.txt",
+        "path": "/simple_openhands/workspace/test.txt",
         "command": "str_replace",
         "old_str": "测试",
         "new_str": "示例",
@@ -343,7 +371,7 @@ curl -X POST "http://localhost:8000/execute_action" \
     "action": {
       "action": "read",
       "args": {
-        "path": "/workspace/test.txt",
+        "path": "/simple_openhands/workspace/test.txt",
         "thought": "查看文件内容"
       }
     }
@@ -356,7 +384,7 @@ curl -X POST "http://localhost:8000/execute_action" \
     "action": {
       "action": "run",
       "args": {
-        "command": "rm /workspace/test.txt",
+        "command": "rm /simple_openhands/workspace/test.txt",
         "thought": "清理测试文件"
       }
     }
@@ -536,6 +564,22 @@ Event (基础事件类)
 - 提供端口可用性检查和可用端口查找功能，支持端口范围搜索
 
 #### **5. VSCode 插件**
+#### **6. Git 功能**
+
+**适配与接口**
+- 通过一个薄适配的 GitHandler 统一执行与输出，API 映射如下：
+  - GET `/git/branch` → `GitHandler.get_current_branch()`
+  - POST `/git/changes` → `GitHandler.get_git_changes()`（多仓库聚合、状态标准化）
+  - POST `/git/diff` → `GitHandler.get_git_diff(file_path)`（返回 original/modified）
+
+**跨平台约束**
+- 避免使用 `grep`、命令替换 `$(...)` 等仅类 Unix 语法；必要信息通过完整命令输出再在 Python 里解析。
+- Windows 容器中通过薄适配层处理 `git.exe`/临时脚本目录等差异。
+
+**返回结构（示例）**
+- `/git/changes`：`[{"status": "M|A|D|U", "path": "relative/path"}, ...]`
+- `/git/diff`：`{"original": "...", "modified": "..."}`
+
 
 **OpenVSCode 服务器**
 - 集成 OpenVSCode 服务器，提供基于浏览器的代码编辑环境
@@ -590,7 +634,7 @@ cd /simple_openhands/code
 1. **修改代码**
 2. **停止旧容器**: `docker stop simple-openhands && docker rm simple-openhands`
 3. **构建镜像**: `docker build -t simple-openhands .`
-4. **启动新容器**: `docker run -d --name simple-openhands -p 8000:8000 -p 3000:3000 -p 8001:8001 -v "$(pwd)/workspace:/workspace" simple-openhands`
+4. **启动新容器**: `docker run -d --name simple-openhands -p 8000:8000 -p 3000:3000 -p 8001:8001 -v "$(pwd)/workspace:/simple_openhands/workspace" -e WORK_DIR=/simple_openhands/workspace simple-openhands`
 5. **验证修改**: 测试新功能是否正常工作
 
 ### 开发提示
