@@ -1,0 +1,690 @@
+# Simple Linux Docker Runtime
+
+[Windows 版本说明请点击这里 → README-Windows.md](README-Windows.md)
+
+基于 OpenHands 的 runtime 代码创建的 Docker 容器，提供 FastAPI 接口来执行 Bash 命令与插件功能。
+
+## 主要功能
+
+### **核心功能**
+
+#### **1. Bash 命令执行系统**
+- 执行 bash 命令
+- 支持交互式操作
+
+#### **2. Python 代码执行引擎**
+- Jupyter 服务器集成（自动初始化）
+- 交互式编程环境
+- 支持文本和PNG图片输出
+
+#### **3. 文件操作管理系统**
+- 文件读取、写入、编辑
+- 文件内容查看（支持 PDF、PNG、JPG、JPEG、GIF）
+
+#### **4. 系统监控与诊断**
+- 服务器状态监控
+- 资源使用统计（CPU、内存、磁盘、I/O）
+- 系统健康检查
+
+#### **5. 插件管理系统**
+- **Jupyter 插件**：自动初始化，提供 Python 执行环境
+- **AgentSkills 插件**：立即可用，提供文件操作、搜索、PDF/DOCX/LaTeX/PPTX解析等技能
+- **VSCode 插件**：手动初始化，提供完整的VSCode开发环境（基于OpenVSCode服务器）
+---
+
+## 用户使用指南
+
+### 0. oh-run CLI 工具（推荐）
+
+**什么是 oh-run？**
+
+`oh-run` 是一个命令行工具，让你可以用 bash 命令与 simple_openhands 运行时交互，无需手动编写复杂的 curl 和 JSON。
+
+**对比示例：**
+```bash
+# 不用 oh-run：需要写冗长的 curl 命令
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{"action":{"action":"run","args":{"command":"pwd"}}}'
+
+# 使用 oh-run：简洁明了
+oh-run 'pwd'
+```
+
+---
+
+#### 安装方法（使用虚拟环境）
+
+```bash
+# 1. 以 micromamba 创建环境为例（推荐，或根据需要使用 conda）
+micromamba create -n oh-run python=3.12 -y
+micromamba activate oh-run
+
+# 2. 升级 pip 并安装（只需做一次）
+pip install -U pip
+cd simple_openhands
+pip install '.[cli]'
+
+# 3. 每次新开终端都需要激活环境后使用
+micromamba activate oh-run
+```
+
+---
+
+#### 配置环境变量
+
+安装后，配置 oh-run 要连接的运行时地址：
+
+```bash
+# 设置运行时地址（必需）
+export OH_API_URL=http://127.0.0.1:8000
+```
+
+**建议**：将上述命令添加到 `~/.bashrc`，这样每次打开终端都会自动设置。
+
+---
+
+#### 使用示例
+
+**基础用法：**
+```bash
+# 执行简单命令
+oh-run 'pwd'
+oh-run 'ls -la'
+oh-run 'whoami'
+```
+
+**高级用法：**
+```bash
+# 添加思考注释（方便调试）
+oh-run --thought '列出项目文件' 'ls -la'
+
+# 设置超时时间（秒）
+oh-run --timeout 120 'find / -name "*.log"'
+
+# 输出原始 JSON（调试用）
+oh-run --raw 'uname -a'
+```
+
+**并行任务场景：**
+
+如果你有多个运行时实例（如多个容器），可以为每个终端/会话设置不同的环境变量：
+
+```bash
+# 终端 1 - 连接到运行时 A
+export OH_API_URL=http://127.0.0.1:8000
+oh-run 'pwd'
+
+# 终端 2 - 连接到运行时 B
+export OH_API_URL=http://127.0.0.1:9000
+oh-run 'pwd'
+```
+
+这样多个任务可以同时进行，互不干扰。
+
+### 1. 环境部署
+
+#### 方式一：一键部署脚本（推荐）
+```bash
+# 进入项目目录
+cd simple_openhands
+
+# 给脚本执行权限
+chmod +x deploy.sh
+
+# 运行部署脚本
+./deploy.sh
+```
+
+#### 方式二：手动部署
+```bash
+# 进入项目目录
+cd simple_openhands
+
+# 构建 Docker 镜像
+docker build -t simple-openhands .
+
+# 启动容器
+docker run -d --name simple-openhands \
+  -p 8000:8000 -p 3000:3000 -p 8001:8001 \
+  -v "$(pwd)/workspace:/simple_openhands/workspace" \
+  -e WORK_DIR=/simple_openhands/workspace \
+  simple-openhands
+
+# 端口说明：
+# -p 8000:8000          # 主API服务端口，提供所有API接口
+# -p 3000:3000          # VSCode服务器端口，用于Web版VSCode访问
+# -p 8001:8001          # Jupyter端口，用于Python代码执行
+
+# 查看启动日志
+docker logs -f simple-openhands
+```
+
+### 2. API 接口使用
+
+#### 基础服务 API
+
+**健康检查**
+```bash
+# 检查服务是否存活
+curl http://localhost:8000/alive
+
+# 获取服务器详细信息
+curl http://localhost:8000/server_info
+
+# 访问根路径
+curl http://localhost:8000/
+```
+
+**系统监控**
+```bash
+# 获取系统资源统计
+curl http://localhost:8000/system/stats
+
+# 重置 bash session
+curl -X POST "http://localhost:8000/reset"
+```
+
+#### execute_action 统一接口
+
+**标准命令格式**
+
+所有操作都通过 `/execute_action` 端点执行，使用统一的JSON格式。以下是完整的命令结构说明：
+
+```json
+{
+  "action": {
+    "action": "action_type",          // 动作类型：run(命令执行)、run_ipython(Python代码)、read(文件读取)、write(文件写入)、edit(文件编辑)
+    "args": {                         // 动作参数，根据动作类型不同而不同
+      "command": "pwd",               // 命令执行：要执行的bash命令
+      "code": "print('Hello')",       // Python执行：要执行的Python代码
+      "path": "/path/to/file",        // 文件操作：文件路径
+      "content": "file content",      // 文件写入/编辑：文件内容
+      "thought": "执行原因说明",       // 可选：执行此动作的思考过程
+      "start": 1,                     // 文件编辑：起始行号(1-indexed)
+      "end": -1,                      // 文件编辑：结束行号(-1表示文件末尾)
+      "command": "str_replace",       // 文件编辑：编辑命令(str_replace, insert等)
+      "old_str": "old text",          // 文件编辑：要替换的旧字符串
+      "new_str": "new text"           // 文件编辑：新的字符串
+    }
+  }
+}
+```
+
+**标准响应格式 (Observation)：**
+
+系统支持多种响应类型，所有响应都使用统一的JSON结构，与action格式保持一致：
+
+```json
+{
+  "observation": "observation_type",  // 响应类型：run(命令执行)、run_ipython(Python代码)、read(文件读取)、write(文件写入)、edit(文件编辑)
+  "args": {                           // 统一参数结构，包含所有相关字段
+    "content": "响应内容",             // 响应的主要内容（命令输出、文件内容、操作结果等）
+    "command": "执行的命令",           // 命令执行：实际执行的bash命令
+    "hidden": false,                  // 命令执行：是否隐藏输出
+    "metadata": {                     // 命令执行：命令执行元数据
+      "exit_code": 0,                 // 命令退出码（0表示成功）
+      "pid": -1,                      // 进程ID
+      "username": "用户名",            // 执行命令的用户名
+      "hostname": "主机名",            // 主机名
+      "working_dir": "工作目录",       // 命令执行时的工作目录
+      "py_interpreter_path": "Python解释器路径", // Python解释器路径
+      "prefix": "",                   // 输出前缀
+      "suffix": "\n[Command completed with exit code 0.]" // 输出后缀
+    },
+    "code": "执行的Python代码",       // Python执行：要执行的Python代码
+    "image_urls": ["图片URL1", "图片URL2"], // Python执行：生成的图片URL列表（如matplotlib图表）
+    "path": "文件路径",                // 文件操作：文件路径
+    "old_content": "旧内容",           // 文件编辑：编辑前的旧内容
+    "new_content": "新内容",           // 文件编辑：编辑后的新内容
+    "prev_exist": false,              // 文件编辑：文件之前是否存在
+    "impl_source": "DEFAULT",         // 文件操作：实现来源
+    "diff": "diff内容",               // 文件编辑：差异内容
+    "error_id": "错误ID"              // 错误响应：错误标识符
+  }
+}
+```
+
+**说明：**
+- 所有observation响应都使用统一的`args`结构
+- 根据不同的observation类型，`args`中会包含相应的字段
+- 字段含义与具体操作类型相关，未使用的字段不会出现在响应中
+- 这种统一格式便于客户端处理，与action的格式保持一致
+
+**1. Bash 命令执行**
+```bash
+# 输出Hello World
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "echo \"Hello World\"",
+        "thought": "输出Hello World消息"
+      }
+    }
+  }'
+  
+# 列出当前目录下的内容
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "ls -la",
+        "thought": "列出当前目录内容"
+      }
+    }
+  }'
+
+# 显示当前工作目录路径
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "pwd",
+        "thought": "显示当前工作目录"
+      }
+    }
+  }'
+
+# 切换到指定目录
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "cd /simple_openhands/workspace",
+        "thought": "切换到工作目录"
+      }
+    }
+  }'
+
+# 显示当前登录的用户名
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "whoami",
+        "thought": "显示当前用户名"
+      }
+    }
+  }'
+
+# 查找指定类型的文件
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "find . -name \"*.py\" | head -5",
+        "thought": "查找Python文件"
+      }
+    }
+  }'
+```
+
+**2. Python 代码执行**
+```bash
+# 执行简单Python代码
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run_ipython",
+      "args": {
+        "code": "print(\"Hello, World!\")"
+      }
+    }
+  }'
+
+# 查看系统信息
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run_ipython",
+      "args": {
+        "code": "import os\nprint(f\"Current directory: {os.getcwd()}\")\nprint(f\"Files: {os.listdir(\".\")}\")"
+      }
+    }
+  }'
+
+# 数据处理示例
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run_ipython",
+      "args": {
+        "code": "numbers = [1, 2, 3, 4, 5]\nsquared = [x**2 for x in numbers]\nprint(f\"Numbers: {numbers}\")\nprint(f\"Squared: {squared}\")\nprint(f\"Sum: {sum(squared)}\")"
+      }
+    }
+  }'
+
+# 网络请求示例
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run_ipython",
+      "args": {
+        "code": "import requests\ntry:\n    response = requests.get(\"https://httpbin.org/get\")\n    print(f\"Status: {response.status_code}\")\n    print(f\"Response: {response.json()}\")\nexcept Exception as e:\n    print(f\"Error: {e}\")"
+      }
+    }
+  }'
+
+# 生成图表示例
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run_ipython",
+      "args": {
+        "code": "import matplotlib.pyplot as plt\nimport numpy as np\nx = np.linspace(0, 10, 100)\ny = np.sin(x)\nplt.plot(x, y)\nplt.title(\"Sine Wave\")\nplt.show()"
+      }
+    }
+  }'
+```
+
+**3. 文件操作（read/write/edit）**
+```bash
+# 写入文件（write）
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "write",
+      "args": {
+        "path": "/simple_openhands/workspace/test.txt",
+        "content": "这是一个测试文件",
+        "thought": "创建测试文件"
+      }
+    }
+  }'
+
+# 编辑文件（edit）
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "edit",
+      "args": {
+        "path": "/simple_openhands/workspace/test.txt",
+        "command": "str_replace",
+        "old_str": "测试",
+        "new_str": "示例",
+        "thought": "修改文件内容"
+      }
+    }
+  }'
+
+# 读取文件（read）
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "read",
+      "args": {
+        "path": "/simple_openhands/workspace/test.txt",
+        "thought": "查看文件内容"
+      }
+    }
+  }'
+
+# 删除文件
+curl -X POST "http://localhost:8000/execute_action" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": {
+      "action": "run",
+      "args": {
+        "command": "rm /simple_openhands/workspace/test.txt",
+        "thought": "清理测试文件"
+      }
+    }
+  }'
+```
+
+
+#### 文件查看端点
+
+**view-file 特殊端点**
+
+除了execute_action统一接口外，还提供专门的文件查看端点：
+```bash
+# 查看图片文件（PNG、JPG、GIF）
+curl "http://localhost:8000/view-file?path=/path/to/your/image.png"
+
+# 查看PDF文件
+curl "http://localhost:8000/view-file?path=/path/to/your/document.pdf"
+
+# 注意：/view-file 只支持图片和PDF文件，不支持文本文件
+# 文本文件请使用上面的 execute_action——read 文件操作
+```
+
+
+
+#### 插件管理 API
+
+**插件状态**
+```bash
+# 获取所有插件状态
+curl http://localhost:8000/plugins
+```
+
+**VSCode 插件**
+```bash
+# 初始化 VSCode 插件
+curl -X POST "http://localhost:8000/plugins/vscode/initialize" \
+  -H "Content-Type: application/json" \
+  -d '{"username": "simple_openhands"}'
+
+# 获取 VSCode 连接URL
+curl http://localhost:8000/vscode-url
+
+# 获取 VSCode 连接令牌
+curl http://localhost:8000/vscode/connection_token
+```
+
+**注意**：
+- Jupyter 插件：服务启动时自动初始化，无需手动操作
+- AgentSkills 插件：函数集合，立即可用，无需初始化
+
+---
+
+## 开发者使用指南
+
+### 环境配置
+
+**容器内环境说明：**
+- 使用 **Poetry** 管理依赖，**micromamba** 管理Python环境
+- 容器内Python命令需要：`/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run python -c "your_code_here"`
+
+**容器内目录结构：**
+```
+/simple_openhands/
+├── code/                    # 应用代码
+├── workspace/              # 工作目录
+├── poetry/                 # Poetry环境
+├── micromamba/             # Python环境
+└── .openvscode-server/     # VSCode服务器
+```
+
+### 项目架构
+
+本项目按照 OpenHands 标准组织类定义，结构清晰：
+
+#### 基础类层次结构
+
+```
+Event (基础事件类)
+├── Action (动作基类)
+│   ├── CmdRunAction (命令执行)
+│   ├── IPythonRunCellAction (Python代码执行)
+│   ├── FileReadAction (文件读取)
+│   ├── FileWriteAction (文件写入)
+│   └── FileEditAction (文件编辑)
+└── Observation (观察基类)
+    ├── CmdOutputObservation (命令输出)
+    ├── IPythonRunCellObservation (Python执行输出)
+    ├── FileReadObservation (文件读取结果)
+    ├── FileWriteObservation (文件写入结果)
+    └── FileEditObservation (文件编辑结果)
+```
+
+### 功能实现细节
+
+#### **1. Bash 命令执行系统**
+
+**命令执行与解析**
+- 支持执行单个 bash 命令，包括管道、重定向、条件语句等
+- 通过 bashlex 库进行智能语法解析
+- 支持命令链（&&、;）、here document 等复杂语法结构
+- 不支持同时执行多条命令
+
+**会话环境管理**
+- 基于 tmux 的持久化 shell 环境
+- 支持多会话管理，每个会话有唯一标识
+- 支持命令历史记录（限制为10,000条）
+- 支持切换工作目录并通过 PS1 提示符自动检测工作目录变化
+
+**执行控制与监控**
+- 通过 tmux 会话实时获取命令的标准输出和错误输出
+- 支持阻塞和非阻塞模式
+- 提供两种超时机制（无变化超时默认30秒和硬超时可配置）
+- 非阻塞模式下自动触发超时防止命令长时间阻塞
+
+**交互与状态管理**
+- 支持与运行中的进程交互，可发送输入数据或特殊控制键（如 Ctrl+C、Ctrl+Z、Ctrl+D 等）
+- 实时跟踪命令执行状态（运行中、完成、超时等）
+- 自动清理命令输出并处理输出截断
+
+**错误处理与容错**
+- 完善的错误处理机制，包括命令解析错误、执行错误、超时错误等异常情况
+- 提供详细的错误信息和状态反馈
+
+#### **2. Python 代码执行引擎**
+
+**Jupyter 服务器集成**
+- 通过 Jupyter 服务器执行 Python 代码，支持交互式编程
+- 自动启动并使用固定端口（8001）
+
+**智能内核管理**
+- 自动初始化、内核生命周期管理、心跳检测、连接重连
+- 支持 LocalRuntime 和 Docker 容器运行模式
+
+**代码执行与输出**
+- 通过 IPythonRunCellAction 执行代码，支持超时设置
+- 多种输出类型处理（文本、图片PNG、ANSI转义序列清理）
+
+**环境集成与错误处理**
+- 与 Poetry 虚拟环境和 micromamba 环境集成
+- 完善的异常捕获和错误信息展示，支持 Linux 系统完整运行
+
+#### **3. 文件操作管理系统**
+
+**文件读取**
+- 通过FileReadAction执行，支持相对路径和绝对路径
+- 自动基于当前工作目录解析，支持UTF-8编码
+
+**文件写入**
+- 通过FileWriteAction执行，支持创建和覆盖文件内容
+- 自动创建必要的目录结构
+
+**文件编辑**
+- 通过FileEditAction执行，支持字符串替换编辑操作（str_replace命令）
+
+**文件查看**
+- 提供/view-file端点，支持查看文件内容
+- 生成HTML格式的文件查看器
+
+**统一接口**
+- 核心文件操作（读取、写入、编辑）通过/execute_action端点统一处理
+- 遵循OpenHands的Action架构
+
+**错误处理**
+- 完善的异常处理，包括文件不存在、路径是目录、权限错误、编码错误等情况的处理
+- 通过返回相应的Observation对象或HTTP异常提供详细错误信息
+
+#### **4. 系统监控与诊断**
+
+**服务器信息**
+- 通过 /server_info 端点提供服务器状态、工作目录、用户名和资源信息
+
+**系统资源监控**
+- 通过 /system/stats 端点监控进程 CPU、内存（RSS、VMS、使用百分比）、磁盘使用情况和 I/O 统计
+
+**端口管理**
+- 提供端口可用性检查和可用端口查找功能，支持端口范围搜索
+
+#### **5. VSCode 插件**
+
+**OpenVSCode 服务器**
+- 集成 OpenVSCode 服务器，提供基于浏览器的代码编辑环境
+- 支持端口配置（默认3000）和自动端口检测
+
+**连接管理**
+- 生成唯一连接令牌，提供 /vscode-url 和 /vscode/connection_token 端点获取连接信息
+
+**工作区配置**
+- 自动创建 .vscode/settings.json 配置文件
+- Windows 容器内自动禁用，Linux 容器正常支持
+
+### 开发指南
+
+#### 添加新的 Action 类型
+
+1. 在相应的模块文件中定义新的 Action 类
+2. 继承自 `Action` 基类
+3. 设置 `action` 属性为唯一的字符串标识
+4. 在 `serialization.py` 的 `actions` 元组中添加新类
+5. 更新 `__init__.py` 的导出
+
+#### 添加新的 Observation 类型
+
+1. 在相应的模块文件中定义新的 Observation 类
+2. 继承自 `Observation` 基类
+3. 设置 `observation` 属性为唯一的字符串标识
+4. 在 `serialization.py` 的 `observations` 元组中添加新类
+5. 更新 `__init__.py` 的导出
+
+### 测试运行
+
+#### 在容器内运行
+```bash
+# 进入容器
+docker exec -it simple-openhands bash
+
+# 切换到代码目录
+cd /simple_openhands/code
+
+# 运行所有测试
+/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests -v
+
+# 或者运行特定测试文件
+/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests/test_bash_session.py -v
+
+# 或者运行特定测试函数
+/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests/test_bash_session.py::test_bash_session_creation -v
+```
+
+### 开发流程
+1. **修改代码**
+2. **停止旧容器**: `docker stop simple-openhands && docker rm simple-openhands`
+3. **构建镜像**: `docker build -t simple-openhands .`
+4. **启动新容器**: `docker run -d --name simple-openhands -p 8000:8000 -p 3000:3000 -p 8001:8001 -v "$(pwd)/workspace:/simple_openhands/workspace" -e WORK_DIR=/simple_openhands/workspace simple-openhands`
+5. **验证修改**: 测试新功能是否正常工作
+
+### 开发提示
+- 大部分操作与用户指南相同
+- 主要区别在于依赖安装和测试运行方式
+- 代码修改后需要重新构建镜像才能生效

@@ -1,0 +1,48 @@
+[project]
+name = "simple_openhands"
+version = "0.1.0"
+description = "Simple OpenHands Runtime Application"
+readme = "README.md"
+requires-python = ">=3.12,<4.0"
+# Keep base deps minimal to avoid installing server stack on host by default
+dependencies = []
+
+[project.optional-dependencies]
+cli = [
+    "requests>=2.32.3",
+]
+server = [
+    "fastapi==0.104.1",
+    "uvicorn[standard]==0.24.0",
+    "pydantic>=2.11.3",
+    "python-multipart==0.0.6",
+    "bashlex==0.18",
+    "psutil==5.9.6",
+    "requests>=2.32.3",
+    "python-json-logger==3.3.0",
+    "termcolor==3.1.0",
+    "tornado>=6.0.0",
+    "tenacity>=8.0.0",
+    "jupyter-kernel-gateway>=2.5.2",
+    "ipykernel>=6.29.5",
+    "openai>=1.0.0",
+    "pypdf>=4.0.0",
+    "python-docx>=1.0.0",
+    "python-pptx>=0.6.0",
+    "pylatexenc>=2.0.0",
+    "opencv-python>=4.8.0",
+    "reportlab>=4.0.0",
+    "libtmux>=0.37,<0.40",  
+    "pythonnet",  
+    "pytest==7.4.3",  
+    "pytest-asyncio==0.21.1",  
+    "httpx==0.25.2",  
+]
+
+[project.scripts]
+start = "simple_openhands.main:main"
+oh-run = "simple_openhands.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

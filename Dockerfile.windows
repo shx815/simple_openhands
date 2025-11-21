@@ -1,0 +1,87 @@
+# Dockerfile.windows
+# Windows容器版本，使用chocolatey + Python + poetry管理环境
+
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+
+# 设置环境变量
+ENV POETRY_VIRTUALENVS_PATH=C:\\simple_openhands\\poetry \
+    PYTHON_ROOT=C:\\Python312 \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    EDITOR=code \
+    VISUAL=code \
+    GIT_EDITOR="code --wait" \
+    OPENVSCODE_SERVER_ROOT=C:\\simple_openhands\\.openvscode-server \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    WORK_DIR=C:\\simple_openhands\\workspace \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    VSCODE_PORT=3000 \
+    JUPYTER_PORT=8001
+
+# 安装Chocolatey并批量安装所有必需工具
+RUN powershell -Command " \
+    # 安装Chocolatey \
+    Set-ExecutionPolicy Bypass -Scope Process -Force; \
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; \
+    iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1')); \
+    \
+    # 设置环境变量 \
+    $env:ChocolateyInstall = \"$($env:ALLUSERSPROFILE)\\chocolatey\"; \
+    $env:PATH = \"$env:ChocolateyInstall\\bin;$env:PATH\"; \
+    \
+    # 批量安装所有工具 \
+    Write-Host 'Installing all required tools...'; \
+    choco install git curl wget 7zip python312 vcredist-all -y --limit-output --no-progress --force; \
+    \
+    # 安装PowerShell 7（指定版本） \
+    Write-Host 'Installing PowerShell 7...'; \
+    choco install powershell-core --version=7.5.2 -y --limit-output --no-progress --force; \
+    \
+    # 安装.NET 9 Runtime \
+    Write-Host 'Installing .NET 9 Runtime...'; \
+    choco install dotnet-runtime --version=9.0.0 -y --limit-output --no-progress --force; \
+    \
+    Write-Host 'All tools installed successfully'"
+
+# 创建目录结构、安装Python依赖并配置环境
+RUN pwsh -Command " \
+    # 创建目录结构 \
+    New-Item -ItemType Directory -Path C:\\simple_openhands\\poetry, C:\\simple_openhands\\code, C:\\simple_openhands\\workspace -Force; \
+    \
+    # 设置目录权限 \
+    icacls 'C:\\simple_openhands' /grant 'ContainerUser:(OI)(CI)F' /T; \
+    icacls 'C:\\simple_openhands\\workspace' /grant 'Everyone:(OI)(CI)F' /T; \
+    icacls 'C:\\simple_openhands\\code' /grant 'Everyone:(OI)(CI)F' /T; \
+    \
+    # 安装Poetry和pythonnet \
+    python -m pip install --upgrade pip poetry pythonnet; \
+    \
+    # 配置Poetry \
+    python -m poetry config virtualenvs.path 'C:\\simple_openhands\\poetry'; \
+    python -m poetry config virtualenvs.create true; \
+    python -m poetry config virtualenvs.in-project false"
+
+# 设置工作目录
+WORKDIR C:\\simple_openhands\\code
+
+# 设置PYTHONPATH环境变量
+ENV PYTHONPATH=C:\\simple_openhands\\code;C:\\simple_openhands\\code\\simple_openhands
+
+# 复制Poetry配置并安装依赖（利用Docker缓存）
+COPY pyproject.toml .
+RUN pwsh -Command "python -m poetry install --no-interaction --no-root"
+
+# 复制应用代码
+COPY simple_openhands simple_openhands
+COPY tests tests
+
+# 使用Windows容器的默认用户
+USER ContainerUser
+
+# 暴露端口
+EXPOSE 8000 3000 8001
+
+# 启动命令
+CMD ["pwsh", "-Command", "& { python -m poetry run python -m simple_openhands.main }"]
