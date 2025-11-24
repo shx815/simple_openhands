@@ -140,7 +140,7 @@ wait_for_service() {
     
     log_error "Service failed to start within $((max_attempts * 2)) seconds"
     log_info "Container logs:"
-    docker logs simple-runtime
+    docker logs simple-openhands
     exit 1
 }
 

@@ -32,13 +32,11 @@
 - **VSCode 插件**：手动初始化，提供完整的VSCode开发环境（基于OpenVSCode服务器）
 ---
 
-## 用户使用指南
-
-### 0. oh-run CLI 工具（推荐）
+## oh-run CLI 工具（推荐）
 
 **什么是 oh-run？**
 
-`oh-run` 是一个命令行工具，让你可以用 bash 命令与 simple_openhands 运行时交互，无需手动编写复杂的 curl 和 JSON。
+`oh-run` 是一个命令行工具，让你可以用oh-run 'bash command' 命令与 simple_openhands 运行时交互，无需手动编写复杂的 curl 和 JSON。
 
 **对比示例：**
 ```bash
@@ -50,8 +48,6 @@ curl -X POST "http://localhost:8000/execute_action" \
 # 使用 oh-run：简洁明了
 oh-run 'pwd'
 ```
-
----
 
 #### 安装方法（使用虚拟环境）
 
@@ -69,8 +65,6 @@ pip install '.[cli]'
 micromamba activate oh-run
 ```
 
----
-
 #### 配置环境变量
 
 安装后，配置 oh-run 要连接的运行时地址：
@@ -79,10 +73,6 @@ micromamba activate oh-run
 # 设置运行时地址（必需）
 export OH_API_URL=http://127.0.0.1:8000
 ```
-
-**建议**：将上述命令添加到 `~/.bashrc`，这样每次打开终端都会自动设置。
-
----
 
 #### 使用示例
 
@@ -120,7 +110,7 @@ export OH_API_URL=http://127.0.0.1:9000
 oh-run 'pwd'
 ```
 
-这样多个任务可以同时进行，互不干扰。
+## 用户使用指南
 
 ### 1. 环境部署
 
@@ -132,8 +122,8 @@ cd simple_openhands
 # 给脚本执行权限
 chmod +x deploy.sh
 
-# 运行部署脚本
-./deploy.sh
+# 运行部署脚本,启动容器时默认使用8000、3000、8001三个端口
+./deploy.sh 
 ```
 
 #### 方式二：手动部署
@@ -149,6 +139,16 @@ docker run -d --name simple-openhands \
   -p 8000:8000 -p 3000:3000 -p 8001:8001 \
   -v "$(pwd)/workspace:/simple_openhands/workspace" \
   -e WORK_DIR=/simple_openhands/workspace \
+  -e LOG_TO_FILE=false \
+  simple-openhands
+
+# 启用文件日志（可选）
+# 添加 -e LOG_TO_FILE=true 环境变量，日志会写入到 /simple_openhands/code/logs/simple_openhands_YYYY-MM-DD.log
+docker run -d --name simple-openhands \
+  -p 8000:8000 -p 3000:3000 -p 8001:8001 \
+  -v "$(pwd)/workspace:/simple_openhands/workspace" \
+  -e WORK_DIR=/simple_openhands/workspace \
+  -e LOG_TO_FILE=true \
   simple-openhands
 
 # 端口说明：
@@ -513,10 +513,22 @@ curl http://localhost:8000/vscode/connection_token
 ```
 /simple_openhands/
 ├── code/                    # 应用代码
-├── workspace/              # 工作目录
-├── poetry/                 # Poetry环境
-├── micromamba/             # Python环境
+│   ├── simple_openhands/   # 源代码
+│   ├── tests/              # 测试代码
+│   ├── pyproject.toml      # Poetry配置
+│   └── poetry.lock         # Poetry锁定文件
+├── workspace/              # 工作目录（挂载点）
+├── poetry/                 # Poetry虚拟环境
+├── micromamba/             # micromamba环境
+├── bin/                    # uv工具（env, uv, uvx）
 └── .openvscode-server/     # VSCode服务器
+
+注意：日志文件（当 LOG_TO_FILE=true 时）会写入到 /simple_openhands/code/logs/ 目录
+
+/home/peter/                # 用户peter的家目录
+├── .bashrc                # Bash配置文件（最小化配置）
+├── .profile               # Profile配置
+└── .openvscode-server/    # VSCode用户配置（运行时创建）
 ```
 
 ### 项目架构

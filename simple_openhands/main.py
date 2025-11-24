@@ -347,7 +347,13 @@ async def get_vscode_url():
             )
         
         # 构建VSCode URL，使用localhost（容器内访问）
-        vscode_url = f"http://localhost:{port}/?tkn={token}&folder={_default_work_dir()}"
+        # 获取工作目录，优先使用环境变量，否则使用默认值
+        if sys.platform == 'win32':
+            default_work_dir = 'C\\simple_openhands\\workspace'
+        else:
+            default_work_dir = '/simple_openhands/workspace'
+        work_dir = os.environ.get('WORK_DIR', default_work_dir)
+        vscode_url = f"http://localhost:{port}/?tkn={token}&folder={work_dir}"
         
         return {
             "status": "success",

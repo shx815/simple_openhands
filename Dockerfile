@@ -42,7 +42,7 @@ RUN curl -fsSL --compressed https://install.python-poetry.org | python -
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/simple_openhands/bin" sh
 
 # Add /simple_openhands/bin to PATH
-ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ENV PATH="/simple_openhands/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Remove UID 1000 named pn or ubuntu, so the 'simple_openhands' user can be created from ubuntu hosts
 RUN (if getent passwd 1000 | grep -q pn; then userdel pn; fi) && \
@@ -50,7 +50,6 @@ RUN (if getent passwd 1000 | grep -q pn; then userdel pn; fi) && \
 
 # Create necessary directories 
 RUN mkdir -p /simple_openhands && \
-    mkdir -p /simple_openhands/logs && \
     mkdir -p /simple_openhands/poetry
 
 # Install micromamba
@@ -137,10 +136,6 @@ RUN useradd -m -s /bin/bash -u 1000 peter \
     && chmod 0440 /etc/sudoers.d/peter \
     && chown peter:peter /simple_openhands \
     && chmod 777 /simple_openhands
-    
-# 预创建任务安装前缀并授权
-RUN mkdir -p /home/peter/result/{bin,lib,include} \
-    && chown -R peter:peter /home/peter/result
 
 # 完全替换 .bashrc 文件，避免任何 PS1 冲突
 RUN rm -f /home/peter/.bashrc \
