@@ -1,1 +1,4 @@
-workspace/
+# Ignore all contents of workspace directory, but keep the directory itself
+workspace/*
+!workspace/.gitkeep
+

@@ -139,7 +139,6 @@ docker run -d --name simple-openhands \
   -p 8000:8000 -p 3000:3000 -p 8001:8001 \
   -v "$(pwd)/workspace:/simple_openhands/workspace" \
   -e WORK_DIR=/simple_openhands/workspace \
-  -e LOG_TO_FILE=false \
   simple-openhands
 
 # 启用文件日志（可选）

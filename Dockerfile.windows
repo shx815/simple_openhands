@@ -71,7 +71,7 @@ ENV PYTHONPATH=C:\\simple_openhands\\code;C:\\simple_openhands\\code\\simple_ope
 
 # 复制Poetry配置并安装依赖（利用Docker缓存）
 COPY pyproject.toml .
-RUN pwsh -Command "python -m poetry install --no-interaction --no-root"
+RUN pwsh -Command "python -m poetry install --no-interaction --no-root --extras server"
 
 # 复制应用代码
 COPY simple_openhands simple_openhands

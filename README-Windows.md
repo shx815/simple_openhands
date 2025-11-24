@@ -28,11 +28,6 @@
 - **Jupyter 插件**：自动初始化，提供 Python 执行环境
 - **AgentSkills 插件**：立即可用，提供文件操作、搜索、PDF/DOCX/LaTeX/PPTX解析等技能
 - **VSCode 插件**：❌ **不支持Windows** - VSCode插件在Windows容器中不可用
- 
-#### **6. Git 版本控制与代码差异**
-- 获取当前分支（/git/branch）
-- 获取变更文件列表（/git/changes）
-- 获取单文件原始/修改内容（/git/diff）
 ---
 
 ## 用户使用指南
@@ -98,20 +93,6 @@ Invoke-WebRequest -Uri "http://localhost:8000/system/stats" -Method GET
 
 # 重置 PowerShell session
 Invoke-WebRequest -Uri "http://localhost:8000/reset" -Method POST
-```
- 
-#### Git API
-
-```powershell
-# 获取当前分支
-Invoke-WebRequest -Uri "http://localhost:8000/git/branch" -Method GET
- 
-# 获取工作区变更（指定工作目录）
-Invoke-WebRequest -Uri "http://localhost:8000/git/changes?cwd=C:\simple_openhands\workspace" -Method POST
- 
-# 获取单文件差异（指定工作目录）
-$body = @{ file_path = "test.txt"; cwd = "C:\simple_openhands\workspace" } | ConvertTo-Json
-Invoke-WebRequest -Uri "http://localhost:8000/git/diff" -Method POST -ContentType "application/json" -Body $body
 ```
 
 #### execute_action 统一接口
@@ -603,22 +584,6 @@ Event (基础事件类)
 - 提供端口可用性检查和可用端口查找功能，支持端口范围搜索
 
 #### **5. VSCode 插件** ❌ **Windows不支持**
- 
-#### **6. Git 功能**
- 
-**适配与接口**
-- 通过薄适配的 GitHandler 统一执行与输出，API 映射如下：
-  - GET `/git/branch` → `GitHandler.get_current_branch()`
-  - POST `/git/changes` → `GitHandler.get_git_changes()`（多仓库聚合、状态标准化）
-  - POST `/git/diff` → `GitHandler.get_git_diff(file_path)`（返回 original/modified）
- 
-**跨平台约束（Windows）**
-- 避免 `grep`、命令替换 `$(...)` 等仅类 Unix 语法；必要信息通过完整命令输出再在 Python 里解析。
-- Windows 容器内通过适配层处理 `git.exe`、临时脚本目录等差异。
- 
-**返回结构（示例）**
-- `/git/changes`：`[{"status": "M|A|D|U", "path": "relative/path"}, ...]`
-- `/git/diff`：`{"original": "...", "modified": "..."}`
 
 **OpenVSCode 服务器**
 - ❌ Windows容器中不支持OpenVSCode服务器
