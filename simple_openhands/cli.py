@@ -5,7 +5,7 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -37,7 +37,7 @@ def _shell_single_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
-def _build_curl_command(api_url: str, api_key: Optional[str], payload: Dict[str, Any]) -> str:
+def _build_curl_command(api_url: str, payload: Dict[str, Any]) -> str:
     endpoint = api_url.rstrip("/") + "/execute_action"
     json_body = json.dumps({"action": payload["action"]}, ensure_ascii=False)
     parts = [
@@ -49,18 +49,16 @@ def _build_curl_command(api_url: str, api_key: Optional[str], payload: Dict[str,
         "-H",
         _shell_single_quote("Content-Type: application/json"),
     ]
-    if api_key:
-        parts.extend(["-H", _shell_single_quote(f"X-Session-API-Key: {api_key}")])
     parts.extend(["-d", _shell_single_quote(json_body)])
     return " ".join(parts)
 
 
-def _read_session_file(path: Path) -> Tuple[Optional[str], Optional[str]]:
+def _read_session_file(path: Path) -> Optional[str]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("api_url"), data.get("api_key")
+        return data.get("api_url")
     except Exception:
-        return None, None
+        return None
 
 
 def _find_session_file(start: Path) -> Optional[Path]:
@@ -75,13 +73,10 @@ def _find_session_file(start: Path) -> Optional[Path]:
         current = current.parent
 
 
-def cmd_context(api_url: str, api_key: Optional[str], raw: bool, timeout: float) -> int:
+def cmd_context(api_url: str, raw: bool, timeout: float) -> int:
     url = api_url.rstrip("/") + "/server_info"
-    headers = {}
-    if api_key:
-        headers["X-Session-API-Key"] = api_key
     try:
-        resp = requests.get(url, headers=headers, timeout=timeout)
+        resp = requests.get(url, timeout=timeout)
         if raw:
             print(resp.text)
             return 0
@@ -98,7 +93,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="oh-run", description="Execute a bash command via Simple OpenHands runtime HTTP API")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute (single command; use shell operators to chain)")
     parser.add_argument("--url", dest="url", default=None, help="Runtime API base URL (e.g. http://127.0.0.1:8000)")
-    parser.add_argument("--api-key", dest="api_key", default=None, help="Optional session API key (sent as X-Session-API-Key)")
     parser.add_argument("--timeout", dest="timeout", type=float, default=600.0, help="Client HTTP timeout in seconds (default: 600)")
     parser.add_argument("--thought", dest="thought", default=None, help="Optional rationale to attach to the action")
     parser.add_argument("--blocking", dest="blocking", action="store_true", help="Mark command as blocking (server may enforce timeouts)")
@@ -106,13 +100,12 @@ def main() -> int:
     parser.add_argument("--context", dest="context", action="store_true", help="Print runtime context (server_info) instead of executing a command")
     parser.add_argument("--emit-curl", dest="emit_curl", action="store_true", help="Print the equivalent curl command")
     parser.add_argument("--via-curl", dest="via_curl", action="store_true", help="Execute the request via curl subprocess instead of HTTP client")
-    parser.add_argument("--session-file", dest="session_file", default=None, help="Path to a .oh-session JSON (overridden by --url/--api-key)")
+    parser.add_argument("--session-file", dest="session_file", default=None, help="Path to a .oh-session JSON (overridden by --url)")
 
     args = parser.parse_args()
 
     # Resolve routing (flags > env > session file)
     api_url = args.url or _read_env("OH_API_URL")
-    api_key = args.api_key or _read_env("OH_API_KEY")
 
     if not api_url:
         # Try explicit session file
@@ -127,16 +120,15 @@ def main() -> int:
             else:
                 session_path = _find_session_file(Path.cwd())
         if session_path and session_path.exists():
-            sf_url, sf_key = _read_session_file(session_path)
+            sf_url = _read_session_file(session_path)
             api_url = api_url or sf_url
-            api_key = api_key or sf_key
 
     if not api_url:
         _print_error("oh-run: OH_API_URL is not set and --url was not provided. Set OH_API_URL or pass --url.")
         return 2
 
     if args.context:
-        return cmd_context(api_url, api_key, raw=args.raw, timeout=args.timeout)
+        return cmd_context(api_url, raw=args.raw, timeout=args.timeout)
 
     if not args.command:
         _print_error("oh-run: no command provided. Example: oh-run \"ls -la\"")
@@ -147,7 +139,7 @@ def main() -> int:
 
     # Optionally emit or execute via curl
     if args.emit_curl or args.via_curl:
-        curl_cmd = _build_curl_command(api_url, api_key, payload)
+        curl_cmd = _build_curl_command(api_url, payload)
         if args.emit_curl and not args.via_curl:
             print(curl_cmd)
             return 0
@@ -182,8 +174,6 @@ def main() -> int:
     # Default: direct HTTP request (robust, cross-platform)
     url = api_url.rstrip("/") + "/execute_action"
     headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["X-Session-API-Key"] = api_key
 
     try:
         resp = requests.post(url, headers=headers, json={"action": payload["action"]}, timeout=args.timeout)

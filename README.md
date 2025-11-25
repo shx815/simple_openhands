@@ -29,7 +29,7 @@
 #### **5. 插件管理系统**
 - **Jupyter 插件**：自动初始化，提供 Python 执行环境
 - **AgentSkills 插件**：立即可用，提供文件操作、搜索、PDF/DOCX/LaTeX/PPTX解析等技能
-- **VSCode 插件**：手动初始化，提供完整的VSCode开发环境（基于OpenVSCode服务器）
+- **VSCode 插件**：手动初始化，提供VSCode开发环境（基于OpenVSCode服务器）
 ---
 
 ## oh-run CLI 工具（推荐）
@@ -453,7 +453,6 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 ```
 
-
 #### 文件查看端点
 
 **view-file 特殊端点**
@@ -469,8 +468,6 @@ curl "http://localhost:8000/view-file?path=/path/to/your/document.pdf"
 # 注意：/view-file 只支持图片和PDF文件，不支持文本文件
 # 文本文件请使用上面的 execute_action——read 文件操作
 ```
-
-
 
 #### 插件管理 API
 
@@ -500,6 +497,214 @@ curl http://localhost:8000/vscode/connection_token
 
 ---
 
+## 快速接入指南
+
+如果你想让其他项目快速接入使用 simple_openhands，可以通过 `oh-run` CLI 工具来执行命令。这种方式可以绕过本地 shell，避免命令中的特殊字符被本地 shell 解析。
+
+### 为什么使用程序化调用而不是 shell？
+
+- **避免 shell 展开**：命令中的 `$变量`、`$(命令)`、反引号等不会被本地 shell 解析，原样传递给 `oh-run`
+- **简化参数传递**：命令字符串作为参数直接传递，无需处理 shell 引号转义的复杂性
+- **可预测性**：不依赖 shell 的配置差异，行为一致
+- **跨平台兼容**：Windows 和 Linux 上行为一致
+
+### Go 语言集成示例
+
+使用 `exec.Command` 直接调用 `oh-run`，避免通过 shell：
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+    "os/exec"
+    "strings"
+    "time"
+)
+
+func executeCommand(ctx context.Context, command string, apiURL string, timeoutSeconds float64) (string, error) {
+    ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds*float64(time.Second)))
+    defer cancel()
+
+    // 检查 oh-run 是否在 PATH 中
+    if _, err := exec.LookPath("oh-run"); err != nil {
+        return "", fmt.Errorf("oh-run not found in PATH: %w", err)
+    }
+
+    trimmed := strings.TrimSpace(command)
+    if trimmed == "" {
+        return "", fmt.Errorf("empty command")
+    }
+
+    // 设置环境变量
+    env := os.Environ()
+    env = append(env, fmt.Sprintf("OH_API_URL=%s", apiURL))
+
+    // 使用 exec.Command 直接调用，不通过 shell
+    cmd := exec.CommandContext(ctxWithTimeout, "oh-run", trimmed)
+    cmd.Env = env
+
+    output, err := cmd.CombinedOutput()
+    if err != nil {
+        return "", fmt.Errorf("command failed: %w\nOutput: %s", err, output)
+    }
+
+    return string(output), nil
+}
+
+// 使用示例
+func main() {
+    ctx := context.Background()
+    apiURL := "http://127.0.0.1:8000"
+    
+    output, err := executeCommand(ctx, "pwd", apiURL, 30.0)
+    if err != nil {
+        fmt.Printf("Error: %v\n", err)
+        return
+    }
+    fmt.Printf("Output: %s\n", output)
+}
+```
+
+### Python 语言集成示例
+
+使用 `subprocess.run()` 直接调用 `oh-run`，避免通过 shell：
+
+```python
+import subprocess
+import os
+from typing import Optional, Tuple
+
+def execute_command(
+    command: str,
+    api_url: str,
+    timeout: Optional[float] = None
+) -> Tuple[str, int]:
+    """
+    执行命令并返回输出和退出码
+    
+    Args:
+        command: 要执行的 bash 命令
+        api_url: simple_openhands API 地址（如 http://127.0.0.1:8000）
+        timeout: 超时时间（秒），None 表示使用默认超时
+    
+    Returns:
+        (输出内容, 退出码)
+    """
+    # 检查 oh-run 是否在 PATH 中
+    import shutil
+    if not shutil.which("oh-run"):
+        raise RuntimeError("oh-run not found in PATH")
+    
+    trimmed = command.strip()
+    if not trimmed:
+        raise ValueError("empty command")
+    
+    # 设置环境变量
+    env = os.environ.copy()
+    env["OH_API_URL"] = api_url
+    
+    # 使用 subprocess.run 直接调用，不通过 shell
+    # shell=False 确保命令字符串作为参数传递，不会被 shell 解析
+    try:
+        result = subprocess.run(
+            ["oh-run", trimmed],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False  # 不自动抛出异常，手动处理退出码
+        )
+        return result.stdout, result.returncode
+    except subprocess.TimeoutExpired as e:
+        return f"Command timed out after {timeout} seconds", -1
+    except FileNotFoundError:
+        raise RuntimeError("oh-run not found in PATH")
+
+# 使用示例
+if __name__ == "__main__":
+    api_url = "http://127.0.0.1:8000"
+    
+    # 执行简单命令
+    output, exit_code = execute_command("pwd", api_url)
+    print(f"Exit code: {exit_code}")
+    print(f"Output: {output}")
+    
+    # 执行带超时的命令
+    output, exit_code = execute_command("sleep 5", api_url, timeout=10.0)
+    print(f"Exit code: {exit_code}")
+    print(f"Output: {output}")
+```
+
+### 集成要点总结
+
+1. **环境变量设置**：
+   - `OH_API_URL`: 必需，指向 simple_openhands API 地址
+
+2. **命令执行**：
+   - 直接调用 `oh-run` 命令，将命令字符串作为参数传递
+   - 不要通过 shell（如 `bash -c`）执行，避免 shell 解析命令
+
+3. **错误处理**：
+   - 检查 `oh-run` 是否在 PATH 中
+   - 处理超时情况
+   - 检查退出码（0 表示成功）
+
+4. **输出格式**：
+   - `oh-run` 的输出格式为：`Command ran and generated the following output:\n```\n{content}\n````
+   - 空输出会显示为 `[empty output]`
+
+
+### Bash Tool Description 建议
+
+如果你需要为 bash 命令执行工具（如 `execute_bash` 或 `run_terminal_cmd`）编写 Tool Description，以下提供了两个版本：详细版（Detailed）和简短版（Short），结合了 OpenHands 和 simple_openhands in CompileBench 的最佳实践。
+
+#### Detailed Version（详细版）
+
+适合需要详细指导的场景：
+
+```text
+Execute a bash command in the terminal within a persistent shell session.
+
+### Command Execution
+* One command at a time: You can only execute one bash command at a time. If you need to run multiple commands sequentially, use `&&` or `;` to chain them together.
+* Persistent session: Commands execute in a persistent shell session where environment variables, virtual environments, and working directory persist between commands.
+* Soft timeout: Commands have a soft timeout of 10 seconds, once that's reached, you have the option to continue or interrupt the command (see section below for details)
+* Shell options: Do NOT use `set -e`, `set -eu`, or `set -euo pipefail` in shell scripts or commands in this environment. The runtime may not support them and can cause unusable shell sessions. If you want to run multi-line bash commands, write the commands to a file and then run it, instead.
+
+### Long-running Commands
+* For commands that may run indefinitely, run them in the background and redirect output to a file, e.g. `python3 app.py > server.log 2>&1 &`.
+* For commands that may run for a long time (e.g. installation or testing commands), or commands that run for a fixed amount of time (e.g. sleep), you should set the "timeout" parameter of your function call to an appropriate value.
+* If a bash command returns exit code `-1`, this means the process hit the soft timeout and is not yet finished. By setting `is_input` to `true`, you can:
+  - Send empty `command` to retrieve additional logs
+  - Send text (set `command` to the text) to STDIN of the running process
+  - Send control commands like `C-c` (Ctrl+C), `C-d` (Ctrl+D), or `C-z` (Ctrl+Z) to interrupt the process
+  - If you do C-c, you can re-start the process with a longer "timeout" parameter to let it run to completion
+
+### Best Practices
+* Directory verification: Before creating new directories or files, first verify the parent directory exists and is the correct location.
+* Directory management: Try to maintain working directory by using absolute paths and avoiding excessive use of `cd`.
+
+### Output Handling
+* Output truncation: If the output exceeds a maximum length, it will be truncated before being returned.
+```
+
+#### Short Version（简短版）
+
+适合需要简洁提示的场景：
+
+```text
+Execute a bash command in the terminal within a persistent shell session.
+
+Execution rules:
+- Interact with running process: If a bash command returns exit code `-1`, this means the process is not yet finished. You can interact with the running process and send empty `command` to retrieve any additional logs, or send additional text to STDIN of the running process, or send command like `C-c` (Ctrl+C), `C-d` (Ctrl+D), `C-z` (Ctrl+Z) to interrupt the process.
+- Don't include any newlines in the command.
+- Do NOT use `set -e`, `set -eu`, or `set -euo pipefail`. These can cause unusable shell sessions.
+- Try to maintain working directory by using absolute paths and avoiding excessive use of `cd`.
+```
+
 ## 开发者使用指南
 
 ### 环境配置
@@ -511,7 +716,7 @@ curl http://localhost:8000/vscode/connection_token
 **容器内目录结构：**
 ```
 /simple_openhands/
-├── code/                    # 应用代码
+├── code/                   # 应用代码
 │   ├── simple_openhands/   # 源代码
 │   ├── tests/              # 测试代码
 │   ├── pyproject.toml      # Poetry配置
@@ -525,9 +730,9 @@ curl http://localhost:8000/vscode/connection_token
 注意：日志文件（当 LOG_TO_FILE=true 时）会写入到 /simple_openhands/code/logs/ 目录
 
 /home/peter/                # 用户peter的家目录
-├── .bashrc                # Bash配置文件（最小化配置）
-├── .profile               # Profile配置
-└── .openvscode-server/    # VSCode用户配置（运行时创建）
+├── .bashrc                 # Bash配置文件（最小化配置）
+├── .profile                # Profile配置
+└── .openvscode-server/     # VSCode用户配置（运行时创建）
 ```
 
 ### 项目架构
