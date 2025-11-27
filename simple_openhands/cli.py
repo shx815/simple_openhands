@@ -1,8 +1,6 @@
 import argparse
 import json
 import os
-import platform
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -27,30 +25,6 @@ def _build_run_action(command: str, thought: str | None = None, blocking: bool |
 def _print_error(message: str) -> None:
     sys.stderr.write(message + "\n")
     sys.stderr.flush()
-
-
-def _shell_single_quote(s: str) -> str:
-    """Safely single-quote a string for POSIX shells.
-
-    Replaces ' with '\'' pattern to avoid breaking out of quotes.
-    """
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def _build_curl_command(api_url: str, payload: Dict[str, Any]) -> str:
-    endpoint = api_url.rstrip("/") + "/execute_action"
-    json_body = json.dumps({"action": payload["action"]}, ensure_ascii=False)
-    parts = [
-        "curl",
-        "-s",
-        "-X",
-        "POST",
-        _shell_single_quote(endpoint),
-        "-H",
-        _shell_single_quote("Content-Type: application/json"),
-    ]
-    parts.extend(["-d", _shell_single_quote(json_body)])
-    return " ".join(parts)
 
 
 def _read_session_file(path: Path) -> Optional[str]:
@@ -98,8 +72,6 @@ def main() -> int:
     parser.add_argument("--blocking", dest="blocking", action="store_true", help="Mark command as blocking (server may enforce timeouts)")
     parser.add_argument("--raw", dest="raw", action="store_true", help="Print raw JSON response instead of extracted content")
     parser.add_argument("--context", dest="context", action="store_true", help="Print runtime context (server_info) instead of executing a command")
-    parser.add_argument("--emit-curl", dest="emit_curl", action="store_true", help="Print the equivalent curl command")
-    parser.add_argument("--via-curl", dest="via_curl", action="store_true", help="Execute the request via curl subprocess instead of HTTP client")
     parser.add_argument("--session-file", dest="session_file", default=None, help="Path to a .oh-session JSON (overridden by --url)")
 
     args = parser.parse_args()
@@ -137,41 +109,7 @@ def main() -> int:
     command_str = " ".join(args.command).strip()
     payload = _build_run_action(command=command_str, thought=args.thought, blocking=args.blocking)
 
-    # Optionally emit or execute via curl
-    if args.emit_curl or args.via_curl:
-        curl_cmd = _build_curl_command(api_url, payload)
-        if args.emit_curl and not args.via_curl:
-            print(curl_cmd)
-            return 0
-        # Execute via curl (POSIX shells only)
-        if platform.system().lower().startswith("win"):
-            _print_error("oh-run: --via-curl is not supported on Windows. Use default HTTP mode or WSL.")
-            return 2
-        try:
-            proc = subprocess.run(["bash", "-lc", curl_cmd], capture_output=True, text=True, timeout=args.timeout)
-            resp_text = proc.stdout
-            if args.raw:
-                print(resp_text)
-                return 0 if proc.returncode == 0 else 1
-            try:
-                data = json.loads(resp_text)
-            except ValueError:
-                print(resp_text)
-                return 1 if proc.returncode != 0 else 0
-            content = data.get("content")
-            if isinstance(content, str):
-                # Format output to match CompileBench's format so it can be directly returned to LLM
-                if len(content.strip()) == 0:
-                    content = "[empty output]"
-                print(f"Command ran and generated the following output:\n```\n{content}\n```")
-                return 0 if proc.returncode == 0 else 1
-            print(json.dumps(data, ensure_ascii=False, indent=2))
-            return 0 if proc.returncode == 0 else 1
-        except subprocess.SubprocessError as e:
-            _print_error(f"oh-run: curl execution failed: {e}")
-            return 2
-
-    # Default: direct HTTP request (robust, cross-platform)
+    # Direct HTTP request (robust, cross-platform)
     url = api_url.rstrip("/") + "/execute_action"
     headers = {"Content-Type": "application/json"}
 

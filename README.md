@@ -65,13 +65,15 @@ pip install '.[cli]'
 micromamba activate oh-run
 ```
 
-#### 配置环境变量
+#### 配置运行时地址（必需）
 
 安装后，配置 oh-run 要连接的运行时地址：
 
 ```bash
-# 设置运行时地址（必需）
-export OH_API_URL=http://127.0.0.1:8000
+# 通过环境变量（推荐）
+export OH_API_URL=http://127.0.0.1:8002
+# 或者使用命令行参数 --url http://127.0.0.1:8002
+oh-run --url http://127.0.0.1:8002 "pwd"
 ```
 
 #### 使用示例
@@ -92,8 +94,20 @@ oh-run --thought '列出项目文件' 'ls -la'
 # 设置超时时间（秒）
 oh-run --timeout 120 'find / -name "*.log"'
 
+# 阻塞命令
+oh-run --blocking "sleep 10"
+
 # 输出原始 JSON（调试用）
 oh-run --raw 'uname -a'
+
+# 指定 API URL
+oh-run --url http://127.0.0.1:8002 "pwd"
+
+# 检查服务器上下文
+oh-run --context
+
+# 组合使用
+oh-run --url http://127.0.0.1:8002 --timeout 300 --thought "安装依赖" "pip install requests"
 ```
 
 **并行任务场景：**
@@ -102,11 +116,11 @@ oh-run --raw 'uname -a'
 
 ```bash
 # 终端 1 - 连接到运行时 A
-export OH_API_URL=http://127.0.0.1:8000
+export OH_API_URL=http://127.0.0.1:8002
 oh-run 'pwd'
 
 # 终端 2 - 连接到运行时 B
-export OH_API_URL=http://127.0.0.1:9000
+export OH_API_URL=http://127.0.0.1:9002
 oh-run 'pwd'
 ```
 
@@ -136,23 +150,24 @@ docker build -t simple-openhands .
 
 # 启动容器
 docker run -d --name simple-openhands \
-  -p 8000:8000 -p 3000:3000 -p 8001:8001 \
+  -p 8002:8000 -p 3001:3000 -p 8001:8001 \
   -v "$(pwd)/workspace:/simple_openhands/workspace" \
   -e WORK_DIR=/simple_openhands/workspace \
   simple-openhands
 
+# 挂载目录可自定义
 # 启用文件日志（可选）
 # 添加 -e LOG_TO_FILE=true 环境变量，日志会写入到 /simple_openhands/code/logs/simple_openhands_YYYY-MM-DD.log
 docker run -d --name simple-openhands \
-  -p 8000:8000 -p 3000:3000 -p 8001:8001 \
+  -p 8002:8000 -p 3001:3000 -p 8001:8001 \
   -v "$(pwd)/workspace:/simple_openhands/workspace" \
   -e WORK_DIR=/simple_openhands/workspace \
   -e LOG_TO_FILE=true \
   simple-openhands
 
 # 端口说明：
-# -p 8000:8000          # 主API服务端口，提供所有API接口
-# -p 3000:3000          # VSCode服务器端口，用于Web版VSCode访问
+# -p 8002:8000          # 主API服务端口，提供所有API接口
+# -p 3001:3000          # VSCode服务器端口，用于Web版VSCode访问
 # -p 8001:8001          # Jupyter端口，用于Python代码执行
 
 # 查看启动日志
@@ -166,22 +181,24 @@ docker logs -f simple-openhands
 **健康检查**
 ```bash
 # 检查服务是否存活
-curl http://localhost:8000/alive
+curl http://localhost:8002/alive
 
 # 获取服务器详细信息
-curl http://localhost:8000/server_info
+curl http://localhost:8002/server_info
+# 或者使用oh-run
+oh-run --context
 
 # 访问根路径
-curl http://localhost:8000/
+curl http://localhost:8002/
 ```
 
 **系统监控**
 ```bash
 # 获取系统资源统计
-curl http://localhost:8000/system/stats
+curl http://localhost:8002/system/stats
 
 # 重置 bash session
-curl -X POST "http://localhost:8000/reset"
+curl -X POST "http://localhost:8002/reset"
 ```
 
 #### execute_action 统一接口
@@ -253,7 +270,7 @@ curl -X POST "http://localhost:8000/reset"
 **1. Bash 命令执行**
 ```bash
 # 输出Hello World
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -266,7 +283,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
   
 # 列出当前目录下的内容
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -279,7 +296,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 显示当前工作目录路径
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -292,7 +309,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 切换到指定目录
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -305,7 +322,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 显示当前登录的用户名
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -318,7 +335,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 查找指定类型的文件
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -334,7 +351,7 @@ curl -X POST "http://localhost:8000/execute_action" \
 **2. Python 代码执行**
 ```bash
 # 执行简单Python代码
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -346,7 +363,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 查看系统信息
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -358,7 +375,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 数据处理示例
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -370,7 +387,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 网络请求示例
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -382,7 +399,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 生成图表示例
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -397,7 +414,7 @@ curl -X POST "http://localhost:8000/execute_action" \
 **3. 文件操作（read/write/edit）**
 ```bash
 # 写入文件（write）
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -411,7 +428,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 编辑文件（edit）
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -427,7 +444,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 读取文件（read）
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -440,7 +457,7 @@ curl -X POST "http://localhost:8000/execute_action" \
   }'
 
 # 删除文件
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://localhost:8002/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -460,10 +477,10 @@ curl -X POST "http://localhost:8000/execute_action" \
 除了execute_action统一接口外，还提供专门的文件查看端点：
 ```bash
 # 查看图片文件（PNG、JPG、GIF）
-curl "http://localhost:8000/view-file?path=/path/to/your/image.png"
+curl "http://localhost:8002/view-file?path=/path/to/your/image.png"
 
 # 查看PDF文件
-curl "http://localhost:8000/view-file?path=/path/to/your/document.pdf"
+curl "http://localhost:8002/view-file?path=/path/to/your/document.pdf"
 
 # 注意：/view-file 只支持图片和PDF文件，不支持文本文件
 # 文本文件请使用上面的 execute_action——read 文件操作
@@ -474,21 +491,27 @@ curl "http://localhost:8000/view-file?path=/path/to/your/document.pdf"
 **插件状态**
 ```bash
 # 获取所有插件状态
-curl http://localhost:8000/plugins
+curl http://localhost:8002/plugins
 ```
 
 **VSCode 插件**
 ```bash
+# 给挂载目录权限
+chmod 777 workspace
+
 # 初始化 VSCode 插件
-curl -X POST "http://localhost:8000/plugins/vscode/initialize" \
+curl -X POST "http://localhost:8002/plugins/vscode/initialize" \
   -H "Content-Type: application/json" \
   -d '{"username": "simple_openhands"}'
 
 # 获取 VSCode 连接URL
-curl http://localhost:8000/vscode-url
+curl http://localhost:8002/vscode-url
 
 # 获取 VSCode 连接令牌
-curl http://localhost:8000/vscode/connection_token
+curl http://localhost:8002/vscode/connection_token
+
+# 使用ip访问示例：（实际请更换ip,port,token）
+http://10.1.2.2:3001/?tkn=9abae0ba-2de0-4c9d-8dcb-11fdf98f74ff&folder=/simple_openhands/workspace"
 ```
 
 **注意**：
@@ -499,9 +522,9 @@ curl http://localhost:8000/vscode/connection_token
 
 ## 快速接入指南
 
-如果你想让其他项目快速接入使用 simple_openhands，可以通过 `oh-run` CLI 工具来执行命令。这种方式可以绕过本地 shell，避免命令中的特殊字符被本地 shell 解析。
+如果你想让其他项目快速接入使用 simple_openhands，可以通过程序化调用 `oh-run` CLI 工具来执行命令。这种方式可以绕过本地 shell，避免命令中的特殊字符被本地 shell 解析。
 
-### 为什么使用程序化调用而不是 shell？
+### 为什么使用程序化调用而不是本地 shell？
 
 - **避免 shell 展开**：命令中的 `$变量`、`$(命令)`、反引号等不会被本地 shell 解析，原样传递给 `oh-run`
 - **简化参数传递**：命令字符串作为参数直接传递，无需处理 shell 引号转义的复杂性
