@@ -13,8 +13,8 @@
 - 支持交互式操作
 
 #### **2. Python 代码执行引擎**
-- Jupyter 服务器集成（自动初始化）
-- 交互式编程环境
+- Jupyter Kernel Gateway 集成（自动初始化）
+- 基于 Jupyter Kernel 的代码执行环境，支持状态保持
 - 支持文本和PNG图片输出
 
 #### **3. 文件操作管理系统**
@@ -72,7 +72,7 @@ micromamba activate oh-run
 ```bash
 # 通过环境变量（推荐）
 export OH_API_URL=http://127.0.0.1:8002
-# 或者使用命令行参数 --url http://127.0.0.1:8002
+# 或者使用命令行参数 
 oh-run --url http://127.0.0.1:8002 "pwd"
 ```
 
@@ -813,13 +813,13 @@ Event (基础事件类)
 
 #### **2. Python 代码执行引擎**
 
-**Jupyter 服务器集成**
-- 通过 Jupyter 服务器执行 Python 代码，支持交互式编程
+**Jupyter Kernel Gateway 集成**
+- 通过 Jupyter Kernel Gateway 执行 Python 代码，基于 Jupyter Kernel 的代码执行环境，支持状态保持
 - 自动启动并使用固定端口（8001）
 
 **智能内核管理**
 - 自动初始化、内核生命周期管理、心跳检测、连接重连
-- 支持 LocalRuntime 和 Docker 容器运行模式
+- 支持 Docker 容器运行模式
 
 **代码执行与输出**
 - 通过 IPythonRunCellAction 执行代码，支持超时设置
