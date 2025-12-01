@@ -134,8 +134,11 @@ RUN if [ -z "${RELEASE_TAG}" ]; then \
 RUN useradd -m -s /bin/bash -u 1000 peter \
     && echo "peter ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/peter \
     && chmod 0440 /etc/sudoers.d/peter \
-    && chown peter:peter /simple_openhands \
-    && chmod 777 /simple_openhands
+    && chown -R peter:peter /simple_openhands/poetry \
+    && chown -R peter:peter /simple_openhands/code \
+    && chown -R peter:peter /simple_openhands/workspace \
+    && chown -R peter:peter /simple_openhands/bin \
+    && chown peter:peter /simple_openhands
 
 # 完全替换 .bashrc 文件，避免任何 PS1 冲突
 RUN rm -f /home/peter/.bashrc \

@@ -73,7 +73,7 @@ micromamba activate oh-run
 # 通过环境变量（推荐）
 export OH_API_URL=http://127.0.0.1:8002
 # 或者使用命令行参数 
-oh-run --url http://127.0.0.1:8002 "pwd"
+oh-run --url http://127.0.0.1:8002 'pwd'
 ```
 
 #### 使用示例
@@ -95,19 +95,34 @@ oh-run --thought '列出项目文件' 'ls -la'
 oh-run --timeout 120 'find / -name "*.log"'
 
 # 阻塞命令
-oh-run --blocking "sleep 10"
+oh-run --blocking 'sleep 10'
 
 # 输出原始 JSON（调试用）
 oh-run --raw 'uname -a'
 
 # 指定 API URL
-oh-run --url http://127.0.0.1:8002 "pwd"
+oh-run --url http://127.0.0.1:8002 'pwd'
 
 # 检查服务器上下文
 oh-run --context
 
 # 组合使用
-oh-run --url http://127.0.0.1:8002 --timeout 300 --thought "安装依赖" "pip install requests"
+oh-run --url http://127.0.0.1:8002 --timeout 300 --thought '安装依赖' 'pip install requests'
+```
+
+**Python 代码执行：**
+```bash
+# 执行 Python 代码（使用 --python 参数）
+oh-run --python 'print("Hello, World!")' 
+
+# 执行多行 Python 代码
+oh-run --python 'import os; print(os.getcwd())'
+
+# 带思考注释
+oh-run --python --thought '测试Python环境' 'import sys; print(sys.version)'
+
+# 或者使用标准库的示例（无需安装额外依赖）
+oh-run --python 'import json; data = {"name": "test", "value": 123}; print(json.dumps(data, indent=2))'
 ```
 
 **并行任务场景：**

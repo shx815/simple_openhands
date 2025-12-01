@@ -22,6 +22,13 @@ def _build_run_action(command: str, thought: str | None = None, blocking: bool |
     return {"action": {"action": "run", "args": args}}
 
 
+def _build_ipython_action(code: str, thought: str | None = None) -> Dict[str, Any]:
+    args: Dict[str, Any] = {"code": code}
+    if thought:
+        args["thought"] = thought
+    return {"action": {"action": "run_ipython", "args": args}}
+
+
 def _print_error(message: str) -> None:
     sys.stderr.write(message + "\n")
     sys.stderr.flush()
@@ -64,8 +71,8 @@ def cmd_context(api_url: str, raw: bool, timeout: float) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="oh-run", description="Execute a bash command via Simple OpenHands runtime HTTP API")
-    parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute (single command; use shell operators to chain)")
+    parser = argparse.ArgumentParser(prog="oh-run", description="Execute a bash command or Python code via Simple OpenHands runtime HTTP API")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="Command to execute (bash command by default, or Python code with --python)")
     parser.add_argument("--url", dest="url", default=None, help="Runtime API base URL (e.g. http://127.0.0.1:8000)")
     parser.add_argument("--timeout", dest="timeout", type=float, default=600.0, help="Client HTTP timeout in seconds (default: 600)")
     parser.add_argument("--thought", dest="thought", default=None, help="Optional rationale to attach to the action")
@@ -73,6 +80,7 @@ def main() -> int:
     parser.add_argument("--raw", dest="raw", action="store_true", help="Print raw JSON response instead of extracted content")
     parser.add_argument("--context", dest="context", action="store_true", help="Print runtime context (server_info) instead of executing a command")
     parser.add_argument("--session-file", dest="session_file", default=None, help="Path to a .oh-session JSON (overridden by --url)")
+    parser.add_argument("--python", dest="python", action="store_true", help="Execute as Python code instead of bash command")
 
     args = parser.parse_args()
 
@@ -103,11 +111,16 @@ def main() -> int:
         return cmd_context(api_url, raw=args.raw, timeout=args.timeout)
 
     if not args.command:
-        _print_error("oh-run: no command provided. Example: oh-run \"ls -la\"")
+        _print_error("oh-run: no command provided. Example: oh-run \"ls -la\" or oh-run --python \"print('Hello')\"")
         return 2
 
     command_str = " ".join(args.command).strip()
-    payload = _build_run_action(command=command_str, thought=args.thought, blocking=args.blocking)
+    
+    # Build action based on whether it's Python code or bash command
+    if args.python:
+        payload = _build_ipython_action(code=command_str, thought=args.thought)
+    else:
+        payload = _build_run_action(command=command_str, thought=args.thought, blocking=args.blocking)
 
     # Direct HTTP request (robust, cross-platform)
     url = api_url.rstrip("/") + "/execute_action"
@@ -132,7 +145,7 @@ def main() -> int:
         print(text)
         return 1 if not resp.ok else 0
 
-    # Simple OpenHands observation format: {"observation": "run", "content": "...", "extras": {...}}
+    # Simple OpenHands observation format: {"observation": "run" or "run_ipython", "content": "...", "extras": {...}}
     content = data.get("content")
     if isinstance(content, str):
         # Format output to match CompileBench's format so it can be directly returned to LLM
@@ -140,6 +153,12 @@ def main() -> int:
             content = "[empty output]"
         print(f"Command ran and generated the following output:\n```\n{content}\n```")
         return 0 if resp.ok else 1
+    
+    # Handle image URLs for Python code execution
+    if isinstance(data, dict) and "image_urls" in data.get("args", {}):
+        image_urls = data["args"].get("image_urls")
+        if image_urls:
+            print(f"\nGenerated {len(image_urls)} image(s). Image URLs available in raw JSON output (use --raw to see).")
 
     # Fallback: pretty print
     print(json.dumps(data, ensure_ascii=False, indent=2))
