@@ -56,8 +56,7 @@ oh-run 'pwd'
 micromamba create -n oh-run python=3.12 -y
 micromamba activate oh-run
 
-# 2. 升级 pip 并安装（只需做一次）
-pip install -U pip
+# 2. 安装 oh-run 工具（只需做一次）
 cd simple_openhands
 pip install '.[cli]'
 

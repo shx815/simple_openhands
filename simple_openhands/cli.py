@@ -148,10 +148,9 @@ def main() -> int:
     # Simple OpenHands observation format: {"observation": "run" or "run_ipython", "content": "...", "extras": {...}}
     content = data.get("content")
     if isinstance(content, str):
-        # Format output to match CompileBench's format so it can be directly returned to LLM
         if len(content.strip()) == 0:
             content = "[empty output]"
-        print(f"Command ran and generated the following output:\n```\n{content}\n```")
+        print(content)
         return 0 if resp.ok else 1
     
     # Handle image URLs for Python code execution
@@ -167,5 +166,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
