@@ -2,3 +2,13 @@
 workspace/*
 !workspace/.gitkeep
 
+# Training artifacts
+outputs/
+checkpoints/
+runs/
+wandb/
+logs/
+*.pt
+*.bin
+*.safetensors
+
