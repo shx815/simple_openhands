@@ -1,0 +1,8 @@
+{
+  "input_records": 164,
+  "passed_records": 164,
+  "failed_records": 0,
+  "pass_rate": 1.0,
+  "runtime_url": "http://127.0.0.1:8002",
+  "out_dir": "C:\\Users\\sunhaixiang\\Desktop\\simple_openhands\\data\\runtime_validated_humaneval"
+}

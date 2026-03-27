@@ -1,0 +1,9 @@
+{
+  "input_records": 591,
+  "mbpp_train": 385,
+  "mbpp_valid": 42,
+  "humaneval_test": 164,
+  "valid_ratio": 0.1,
+  "seed": 42,
+  "out_dir": "C:\\Users\\sunhaixiang\\Desktop\\simple_openhands\\DATA\\final"
+}

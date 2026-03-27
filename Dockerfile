@@ -21,7 +21,9 @@ ENV POETRY_VIRTUALENVS_PATH=/simple_openhands/poetry \
     JUPYTER_PORT=8001
 
 # Install base system dependencies and Python 3.12
-RUN apt-get update && \
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list && \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/99-retry && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         software-properties-common gnupg2 && \
     add-apt-repository ppa:deadsnakes/ppa -y && \
