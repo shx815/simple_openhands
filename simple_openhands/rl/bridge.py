@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import re
 import traceback
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,22 @@ def extract_asserts(test_code: str) -> list[str]:
     return [line for line in lines if line.startswith("assert ")]
 
 
+def align_entry_point(generated_solution: str, entry_point: str) -> str:
+    normalized = generated_solution.replace("\r\n", "\n").rstrip()
+    if not entry_point or f"def {entry_point}(" in normalized:
+        return normalized
+
+    function_names = re.findall(r"(?m)^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", normalized)
+    unique_names = list(dict.fromkeys(function_names))
+    if len(unique_names) != 1:
+        return normalized
+
+    source_name = unique_names[0]
+    if source_name == entry_point:
+        return normalized
+    return normalized + f"\n\n{entry_point} = {source_name}\n"
+
+
 class CodePolicy:
     """Load a base or SFT model and expose generation/logprob helpers."""
 
@@ -50,6 +67,7 @@ class CodePolicy:
         base_model_path: str,
         trust_remote_code: bool,
         adapter_path: str | None = None,
+        trainable_adapter: bool = False,
         prompt_template: str = "### Problem:\n{prompt}\n\n### Solution:\n",
     ) -> None:
         self.prompt_template = prompt_template
@@ -69,7 +87,11 @@ class CodePolicy:
         if adapter_path is not None:
             if PeftModel is None:
                 raise ImportError("peft is required to load the SFT adapter.")
-            self.model = PeftModel.from_pretrained(self.model, adapter_path)
+            self.model = PeftModel.from_pretrained(
+                self.model,
+                adapter_path,
+                is_trainable=trainable_adapter,
+            )
         self.model.eval()
 
     def unload(self) -> None:
@@ -115,6 +137,13 @@ class CodePolicy:
         }
 
     def response_logprob(self, prompt_text: str, response_text: str) -> float:
+        with torch.no_grad():
+            logprob, _ = self.response_stats(prompt_text=prompt_text, response_text=response_text)
+        return float(logprob.item())
+
+    def response_stats(
+        self, prompt_text: str, response_text: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         full_text = prompt_text + response_text
         tokenized = self.tokenizer(full_text, return_tensors="pt")
         if hasattr(self.model, "device"):
@@ -125,20 +154,29 @@ class CodePolicy:
         prompt_ids = self.tokenizer(prompt_text, return_tensors="pt")["input_ids"]
         prompt_length = int(prompt_ids.shape[1])
 
-        with torch.no_grad():
-            logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+        )
+        logits = outputs.logits
+        hidden_states = outputs.hidden_states[-1]
 
         log_probs = torch.log_softmax(logits[:, :-1, :], dim=-1)
         target_ids = input_ids[:, 1:]
 
         response_start = max(prompt_length - 1, 0)
         if response_start >= target_ids.shape[1]:
-            return 0.0
+            pooled_hidden = hidden_states[:, -1, :]
+            return torch.zeros((), device=self.model.device), pooled_hidden.squeeze(0)
 
         selected = log_probs[:, response_start:, :].gather(
             2, target_ids[:, response_start:].unsqueeze(-1)
         )
-        return float(selected.sum().item())
+        response_hidden_start = min(prompt_length, hidden_states.shape[1] - 1)
+        response_hidden = hidden_states[:, response_hidden_start:, :]
+        pooled_hidden = response_hidden.mean(dim=1)
+        return selected.sum(), pooled_hidden.squeeze(0)
 
 
 class LocalCodeSandboxEnv:
@@ -163,9 +201,13 @@ class LocalCodeSandboxEnv:
 
         namespace: dict[str, Any] = {"__builtins__": __builtins__}
         test_cases = extract_asserts(str(self.current_record["test_code"]))
+        aligned_solution = align_entry_point(
+            generated_solution=generated_solution,
+            entry_point=str(self.current_record["entry_point"]),
+        )
 
         try:
-            exec(generated_solution.replace("\r\n", "\n").rstrip() + "\n", namespace, namespace)
+            exec(aligned_solution + "\n", namespace, namespace)
         except Exception:
             info = {
                 "passed": False,
