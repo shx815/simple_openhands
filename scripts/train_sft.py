@@ -167,7 +167,7 @@ def build_model_and_tokenizer(config: dict[str, Any]) -> tuple[Any, Any]:
     model = AutoModelForCausalLM.from_pretrained(
         config["model_name_or_path"],
         trust_remote_code=config.get("trust_remote_code", False),
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
     )
 
     if config.get("gradient_checkpointing", False):
@@ -198,7 +198,6 @@ def build_training_arguments(config: dict[str, Any]) -> TrainingArguments:
     output_dir = str((REPO_ROOT / config["output_dir"]).resolve())
     return TrainingArguments(
         output_dir=output_dir,
-        overwrite_output_dir=True,
         num_train_epochs=config["num_train_epochs"],
         per_device_train_batch_size=config["per_device_train_batch_size"],
         per_device_eval_batch_size=config["per_device_eval_batch_size"],
@@ -207,7 +206,7 @@ def build_training_arguments(config: dict[str, Any]) -> TrainingArguments:
         weight_decay=config["weight_decay"],
         warmup_ratio=config["warmup_ratio"],
         logging_steps=config["logging_steps"],
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=config["eval_steps"],
         save_steps=config["save_steps"],
         save_total_limit=config["save_total_limit"],
@@ -260,7 +259,6 @@ def main() -> int:
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
         data_collator=collator,
-        tokenizer=tokenizer,
     )
 
     trainer.train()
