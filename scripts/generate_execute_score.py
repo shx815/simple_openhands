@@ -13,6 +13,8 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from simple_openhands.rl.bridge import align_entry_point
+
 try:
     from peft import PeftModel
 except ImportError:  # pragma: no cover
@@ -166,9 +168,13 @@ def extract_asserts(test_code: str) -> list[str]:
 def score_solution(generated_solution: str, record: dict[str, Any]) -> dict[str, Any]:
     namespace: dict[str, Any] = {"__builtins__": __builtins__}
     test_cases = extract_asserts(str(record["test_code"]))
+    aligned_solution = align_entry_point(
+        generated_solution=generated_solution,
+        entry_point=str(record["entry_point"]),
+    )
 
     try:
-        exec(generated_solution.replace("\r\n", "\n").rstrip() + "\n", namespace, namespace)
+        exec(aligned_solution + "\n", namespace, namespace)
     except Exception:
         return {
             "reward": 0.0,

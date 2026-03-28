@@ -17,7 +17,8 @@ class ScalarValueHead(nn.Module):
         self.value = nn.Linear(hidden_size, 1)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.value(self.dropout(hidden_states)).squeeze(-1)
+        hidden_states = self.dropout(hidden_states).to(self.value.weight.dtype)
+        return self.value(hidden_states).squeeze(-1)
 
 
 def compute_single_step_gae(
