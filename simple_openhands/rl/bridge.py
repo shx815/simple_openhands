@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import gc
+import inspect
 import json
 import re
 import traceback
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +46,11 @@ def extract_asserts(test_code: str) -> list[str]:
     return [line for line in lines if line.startswith("assert ")]
 
 
+def uses_humaneval_check(test_code: str) -> bool:
+    normalized = test_code.replace("\r\n", "\n")
+    return "def check(candidate):" in normalized and "check(" in normalized
+
+
 def align_entry_point(generated_solution: str, entry_point: str) -> str:
     normalized = generated_solution.replace("\r\n", "\n").rstrip()
     if not entry_point or f"def {entry_point}(" in normalized:
@@ -57,6 +65,257 @@ def align_entry_point(generated_solution: str, entry_point: str) -> str:
     if source_name == entry_point:
         return normalized
     return normalized + f"\n\n{entry_point} = {source_name}\n"
+
+
+def clean_generated_solution(generated_solution: str) -> str:
+    """Extract executable Python from model output."""
+    normalized = generated_solution.replace("\r\n", "\n").strip()
+
+    fenced_blocks = re.findall(
+        r"```(?:python|py)?\s*(.*?)```",
+        normalized,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced_blocks:
+        normalized = next(
+            (
+                block.strip()
+                for block in fenced_blocks
+                if re.search(r"(?m)^(from|import|def|class|@)\s+", block.strip())
+            ),
+            fenced_blocks[0].strip(),
+        )
+
+    for marker in ("### Solution:", "Solution:"):
+        if marker in normalized:
+            normalized = normalized.split(marker, maxsplit=1)[-1].strip()
+
+    lines = normalized.splitlines()
+    start_index = None
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*(from|import|def|class|@)\s+", line):
+            start_index = index
+            break
+    if start_index is not None:
+        normalized = "\n".join(lines[start_index:]).strip()
+
+    lines = normalized.splitlines()
+    for end_index in range(len(lines), 0, -1):
+        candidate = "\n".join(lines[:end_index]).strip()
+        if not candidate:
+            continue
+        try:
+            compile(candidate, "<generated_solution>", "exec")
+            return candidate
+        except SyntaxError:
+            continue
+
+    return normalized
+
+
+def _ast_node_counts(code: str) -> Counter[str]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return Counter()
+    ignored = {"Load", "Store", "Del", "Module"}
+    return Counter(
+        type(node).__name__
+        for node in ast.walk(tree)
+        if type(node).__name__ not in ignored
+    )
+
+
+def compute_ast_similarity(generated_solution: str, canonical_solution: str) -> float:
+    generated_counts = _ast_node_counts(generated_solution)
+    canonical_counts = _ast_node_counts(canonical_solution)
+    if not generated_counts or not canonical_counts:
+        return 0.0
+
+    overlap = sum(
+        min(generated_counts[node_type], canonical_counts[node_type])
+        for node_type in generated_counts.keys() | canonical_counts.keys()
+    )
+    normalizer = max(sum(generated_counts.values()), sum(canonical_counts.values()))
+    if normalizer == 0:
+        return 0.0
+    return round(overlap / normalizer, 4)
+
+
+def _canonical_arg_count(canonical_solution: str, entry_point: str) -> int | None:
+    try:
+        tree = ast.parse(canonical_solution)
+    except SyntaxError:
+        return None
+
+    function_defs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    target = next((node for node in function_defs if node.name == entry_point), None)
+    if target is None and function_defs:
+        target = function_defs[0]
+    if target is None:
+        return None
+
+    args = target.args
+    count = len(args.posonlyargs) + len(args.args) + len(args.kwonlyargs)
+    if args.vararg is not None:
+        count += 1
+    if args.kwarg is not None:
+        count += 1
+    return count
+
+
+def compute_signature_reward(
+    namespace: dict[str, Any],
+    canonical_solution: str,
+    entry_point: str,
+) -> float:
+    candidate = namespace.get(entry_point)
+    if not callable(candidate):
+        return 0.0
+
+    canonical_count = _canonical_arg_count(canonical_solution, entry_point)
+    if canonical_count is None:
+        return 0.0
+
+    try:
+        generated_signature = inspect.signature(candidate)
+    except (TypeError, ValueError):
+        return 0.0
+    generated_count = len(generated_signature.parameters)
+    return 1.0 if generated_count == canonical_count else 0.0
+
+
+def compute_shaped_reward(
+    passed_tests: int,
+    total_tests: int,
+    execution_ok: bool,
+) -> float:
+    """Dense reward for PPO.
+
+    Reward layout:
+    - 0.1 for generating executable code
+    - 0.8 * test pass ratio
+    - 0.1 extra bonus for full pass
+    """
+    if not execution_ok or total_tests <= 0:
+        return 0.0
+
+    pass_ratio = passed_tests / total_tests
+    full_pass_bonus = 0.1 if passed_tests == total_tests else 0.0
+    reward = 0.1 + 0.8 * pass_ratio + full_pass_bonus
+    return round(min(reward, 1.0), 4)
+
+
+def compute_reward(
+    *,
+    record: dict[str, Any],
+    namespace: dict[str, Any],
+    cleaned_solution: str,
+    aligned_solution: str,
+    passed_tests: int,
+    total_tests: int,
+    execution_ok: bool,
+    reward_mode: str = "v2",
+) -> tuple[float, dict[str, float]]:
+    if not execution_ok or total_tests <= 0:
+        return 0.0, {
+            "executable": 0.0,
+            "entry_point": 0.0,
+            "ast": 0.0,
+            "signature": 0.0,
+            "test_pass_ratio": 0.0,
+            "full_pass": 0.0,
+        }
+
+    pass_ratio = passed_tests / total_tests
+    full_pass = 1.0 if passed_tests == total_tests else 0.0
+
+    if reward_mode == "v2":
+        reward = compute_shaped_reward(
+            passed_tests=passed_tests,
+            total_tests=total_tests,
+            execution_ok=execution_ok,
+        )
+        return reward, {
+            "executable": 1.0,
+            "entry_point": 1.0 if str(record["entry_point"]) in namespace else 0.0,
+            "ast": 0.0,
+            "signature": 0.0,
+            "test_pass_ratio": round(pass_ratio, 4),
+            "full_pass": full_pass,
+        }
+
+    if reward_mode not in {"v3", "v3b"}:
+        raise ValueError(f"Unsupported reward_mode: {reward_mode}")
+
+    entry_point = str(record["entry_point"])
+    entry_reward = 1.0 if callable(namespace.get(entry_point)) else 0.0
+    ast_reward = compute_ast_similarity(
+        generated_solution=aligned_solution,
+        canonical_solution=str(record.get("canonical_solution", "")),
+    )
+    signature_reward = compute_signature_reward(
+        namespace=namespace,
+        canonical_solution=str(record.get("canonical_solution", "")),
+        entry_point=entry_point,
+    )
+    if reward_mode == "v3":
+        reward = (
+            0.10
+            + 0.10 * entry_reward
+            + 0.15 * ast_reward
+            + 0.10 * signature_reward
+            + 0.45 * pass_ratio
+            + 0.10 * full_pass
+        )
+    else:
+        reward = (
+            0.05
+            + 0.05 * entry_reward
+            + 0.05 * ast_reward
+            + 0.05 * signature_reward
+            + 0.70 * pass_ratio
+            + 0.10 * full_pass
+        )
+    components = {
+        "executable": 1.0,
+        "entry_point": round(entry_reward, 4),
+        "ast": round(ast_reward, 4),
+        "signature": round(signature_reward, 4),
+        "test_pass_ratio": round(pass_ratio, 4),
+        "full_pass": full_pass,
+    }
+    return round(min(reward, 1.0), 4), components
+
+
+def execute_test_code(
+    namespace: dict[str, Any],
+    record: dict[str, Any],
+) -> tuple[int, int, str | None]:
+    test_code = str(record["test_code"])
+
+    if uses_humaneval_check(test_code):
+        try:
+            exec(test_code + "\n", namespace, namespace)
+            return 1, 1, None
+        except Exception:
+            return 0, 1, traceback.format_exc()
+
+    test_cases = extract_asserts(test_code)
+    passed_tests = 0
+    failure_trace = None
+    for test_case in test_cases:
+        try:
+            exec(test_case + "\n", namespace, namespace)
+            passed_tests += 1
+        except Exception:
+            if failure_trace is None:
+                failure_trace = traceback.format_exc()
+    return passed_tests, len(test_cases), failure_trace
 
 
 class CodePolicy:
@@ -182,8 +441,9 @@ class CodePolicy:
 class LocalCodeSandboxEnv:
     """Minimal local execution environment for prompt -> code -> reward."""
 
-    def __init__(self, records: list[dict[str, Any]]) -> None:
+    def __init__(self, records: list[dict[str, Any]], reward_mode: str = "v2") -> None:
         self.records = records
+        self.reward_mode = reward_mode
         self.current_record: dict[str, Any] | None = None
 
     def reset(self, index: int) -> dict[str, Any]:
@@ -200,36 +460,47 @@ class LocalCodeSandboxEnv:
             raise RuntimeError("reset() must be called before step().")
 
         namespace: dict[str, Any] = {"__builtins__": __builtins__}
-        test_cases = extract_asserts(str(self.current_record["test_code"]))
+        cleaned_solution = clean_generated_solution(generated_solution)
         aligned_solution = align_entry_point(
-            generated_solution=generated_solution,
+            generated_solution=cleaned_solution,
             entry_point=str(self.current_record["entry_point"]),
         )
 
         try:
             exec(aligned_solution + "\n", namespace, namespace)
         except Exception:
+            test_code = str(self.current_record["test_code"])
             info = {
                 "passed": False,
                 "passed_tests": 0,
-                "total_tests": len(test_cases),
+                "total_tests": 1 if uses_humaneval_check(test_code) else len(extract_asserts(test_code)),
                 "error_type": "generation_execution_error",
                 "content": traceback.format_exc(),
+                "reward_components": {
+                    "executable": 0.0,
+                    "entry_point": 0.0,
+                    "ast": 0.0,
+                    "signature": 0.0,
+                    "test_pass_ratio": 0.0,
+                    "full_pass": 0.0,
+                },
             }
             return {"task_id": self.current_record["task_id"]}, 0.0, True, info
 
-        passed_tests = 0
-        failure_trace = None
-        for test_case in test_cases:
-            try:
-                exec(test_case + "\n", namespace, namespace)
-                passed_tests += 1
-            except Exception:
-                if failure_trace is None:
-                    failure_trace = traceback.format_exc()
-
-        total_tests = len(test_cases)
-        reward = 0.0 if total_tests == 0 else round(passed_tests / total_tests, 4)
+        passed_tests, total_tests, failure_trace = execute_test_code(
+            namespace=namespace,
+            record=self.current_record,
+        )
+        reward, reward_components = compute_reward(
+            record=self.current_record,
+            namespace=namespace,
+            cleaned_solution=cleaned_solution,
+            aligned_solution=aligned_solution,
+            passed_tests=passed_tests,
+            total_tests=total_tests,
+            execution_ok=True,
+            reward_mode=self.reward_mode,
+        )
         passed = passed_tests == total_tests
         info = {
             "passed": passed,
@@ -237,6 +508,7 @@ class LocalCodeSandboxEnv:
             "total_tests": total_tests,
             "error_type": None if passed else "partial_or_failed_tests",
             "content": "" if passed else (failure_trace or ""),
+            "reward_components": reward_components,
         }
         return {"task_id": self.current_record["task_id"]}, reward, True, info
 

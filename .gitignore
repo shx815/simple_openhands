@@ -2,6 +2,22 @@
 workspace/*
 !workspace/.gitkeep
 
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local editor settings
+.vscode/
+
+# Archive duplicates
+*.zip
+
+# Raw dataset repositories downloaded locally.
+# The processed/final JSONL datasets are tracked instead.
+data/humaneval/
+data/mbpp/
+
 # Training artifacts
 outputs/
 checkpoints/

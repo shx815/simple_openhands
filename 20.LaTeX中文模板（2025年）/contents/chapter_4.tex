@@ -1,0 +1,286 @@
+% !TEX root = ../main.tex
+
+\chapter{实验设计与结果分析}
+
+本章围绕第三章提出的基于执行反馈的 PPO 代码生成方法进行实验验证。实验目标包括：第一，比较 Base、SFT 和 PPO 三类模型在验证集和测试集上的表现；第二，分析 PPO 超参数和 reward 设计对结果的影响；第三，通过案例分析说明 PPO 在部分样例中能够修复 SFT 错误，同时也可能造成边界条件退化。实验结果表明，本文实现的 PPO 闭环能够在 MBPP 验证集上改善 SFT 后模型的表现，但在 HumanEval 测试集上的泛化能力仍有限。
+
+\section{实验环境与模型设置}
+
+本文实验主要在 AutoDL 云服务器上完成。服务器配备单张 NVIDIA GeForce RTX 4090 D 显卡，显存为 24GB，CPU 为 16 核，内存为 60GB。软件环境使用 Python 3.12、PyTorch 2.11.0+cu130，并通过 Hugging Face Transformers、PEFT 和 Accelerate 等库完成模型加载、LoRA 微调和生成评测。实验主要工作目录位于 \texttt{/root/autodl-tmp/work/simple\_openhands}，模型缓存目录位于 \texttt{/root/autodl-tmp/models}。
+
+本文使用 Qwen2.5-Coder-1.5B 作为基座模型。该模型是面向代码任务训练的因果语言模型，具备较强的代码生成能力。实验中，Base 表示不加载任何 adapter 的基座模型；SFT baseline 表示在 MBPP 训练集上进行 LoRA 监督微调后的模型；PPO best 表示在 SFT adapter 基础上使用 reward\_v2 和 PPO 更新得到的最佳模型。
+
+SFT 训练的主要配置如表 \ref{tab:sft-config} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{SFT 训练主要配置}
+  \label{tab:sft-config}
+  \begin{tabular}{ll}
+    \toprule
+    参数 & 取值 \\
+    \midrule
+    基座模型 & Qwen2.5-Coder-1.5B \\
+    训练文件 & \texttt{data/final/sft\_train.jsonl} \\
+    验证文件 & \texttt{data/final/sft\_valid.jsonl} \\
+    训练轮数 & 5 \\
+    最大长度 & 1024 \\
+    batch size & 2 \\
+    gradient accumulation steps & 8 \\
+    learning rate & $1\times10^{-4}$ \\
+    LoRA rank & 16 \\
+    LoRA alpha & 32 \\
+    LoRA dropout & 0.1 \\
+    target modules & q\_proj, k\_proj, v\_proj, o\_proj, gate\_proj, up\_proj, down\_proj \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+PPO 训练采用单步 episode 形式，主要配置如表 \ref{tab:ppo-config} 所示。由于实验算力和数据规模有限，本文没有进行大规模多轮 PPO，而是重点分析不同超参数和 reward 设计对一次 PPO update 的影响。
+
+\begin{table}[!htp]
+  \centering
+  \caption{PPO 训练主要配置}
+  \label{tab:ppo-config}
+  \begin{tabular}{ll}
+    \toprule
+    参数 & 取值 \\
+    \midrule
+    初始策略 & SFT adapter \\
+    epochs & 1 \\
+    batch size & 4 \\
+    clip epsilon & 0.2 \\
+    value loss coefficient & 0.5 \\
+    gamma & 1.0 \\
+    GAE lambda & 1.0 \\
+    learning rate & $1\times10^{-5}$ 或 $5\times10^{-6}$ \\
+    KL coefficient & 0.02 或 0.01 \\
+    rollout 数量 & 42 或 100 \\
+    主要 reward & reward\_v2 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{数据集统计与可用性验证}
+
+本文实验使用 MBPP 和 HumanEval 两个数据集。MBPP 用于 SFT 训练、SFT 验证、PPO rollout 和 PPO 验证；HumanEval 作为最终测试集，用于评价模型跨数据集泛化能力。最终数据划分如表 \ref{tab:dataset-stat} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{最终数据集统计}
+  \label{tab:dataset-stat}
+  \begin{tabular}{llll}
+    \toprule
+    文件 & 样本数 & 来源 & 用途 \\
+    \midrule
+    \texttt{sft\_train.jsonl} & 385 & MBPP & SFT 训练 \\
+    \texttt{sft\_valid.jsonl} & 42 & MBPP & SFT 验证 \\
+    \texttt{rl\_train.jsonl} & 385 & MBPP & PPO rollout 训练池 \\
+    \texttt{rl\_valid.jsonl} & 42 & MBPP & PPO 验证集 \\
+    \texttt{rl\_test\_humaneval.jsonl} & 164 & HumanEval & 最终测试集 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+为了保证执行反馈的可靠性，本文对数据进行了 runtime 复核。复核过程将标准答案与测试代码放入执行环境中运行，确认测试代码可以正确调用入口函数并完成断言检查。复核结果如表 \ref{tab:runtime-check} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{数据 runtime 可用性复核结果}
+  \label{tab:runtime-check}
+  \begin{tabular}{lrrrr}
+    \toprule
+    复核集 & 输入样本数 & 通过样本数 & 失败样本数 & pass rate \\
+    \midrule
+    全量格式复核 & 591 & 591 & 0 & 1.0 \\
+    MBPP valid runtime 复核 & 42 & 42 & 0 & 1.0 \\
+    MBPP train runtime 复核 & 385 & 385 & 0 & 1.0 \\
+    HumanEval runtime 复核 & 164 & 164 & 0 & 1.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+该结果说明，本文使用的数据字段、入口函数和测试代码均可被当前执行环境正确处理。由于本文的 reward 直接依赖测试执行结果，数据可执行性复核是后续实验可信性的基础。
+
+\section{SFT 实验设置与结果}
+
+SFT 阶段使用 MBPP train 的 385 条样本进行训练，验证集为 MBPP valid 的 42 条样本。模型采用 LoRA 参数高效微调，训练 5 个 epoch。训练完成后，SFT adapter 的验证集 \texttt{eval\_loss} 为 0.7472，训练耗时约 5 分钟。
+
+为了评价 SFT 是否提升代码生成能力，本文将 Base 和 SFT baseline 在验证集与 HumanEval 测试集上进行对比。结果显示，在 MBPP valid 上，Base 模型的 Pass@1 为 0.6667，而 SFT baseline 为 0.5714；在 HumanEval test 上，Base 的 Pass@1 为 0.5000，而 SFT baseline 为 0.5244。该结果说明，小规模 SFT 并未在所有数据分布上稳定提升模型能力。
+
+这一现象有两点解释。首先，Qwen2.5-Coder-1.5B 本身是较强代码基座模型，在统一清洗和后处理口径下已经具备较高 valid 表现。其次，本文 SFT 数据规模较小，且主要来自 MBPP，模型可能学习到特定数据格式和解题风格，但不一定能全面提升泛化能力。因此，本文后续 PPO 实验更关注执行反馈能否修复 SFT 后在验证集上的性能下降。
+
+\section{PPO 主实验结果}
+
+本文首先比较 Base、SFT baseline 和 PPO best 在 MBPP valid 上的结果。PPO best 使用 reward\_v2、42 条 rollout、learning rate 为 $1\times10^{-5}$、KL 系数为 0.02。验证集结果如表 \ref{tab:valid-main} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{rl\_valid 上 Base、SFT 与 PPO best 对比}
+  \label{tab:valid-main}
+  \begin{tabular}{lrrrl}
+    \toprule
+    模型 & Pass@1 & full pass & average reward & 结论 \\
+    \midrule
+    Base & 0.6667 & 28/42 & 0.7381 & 强基座模型在 valid 上已较强 \\
+    SFT baseline & 0.5714 & 24/42 & 0.6524 & 小样本 SFT 后 valid 表现下降 \\
+    PPO best & 0.6667 & 28/42 & 0.7190 & 相比 SFT 明显提升，追平 Base \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+从表 \ref{tab:valid-main} 可以看出，PPO best 将 Pass@1 从 SFT baseline 的 0.5714 提升到 0.6667，full pass 样本数从 24 个提升到 28 个。这说明执行反馈 PPO 能够在当前验证集分布上修复 SFT 后模型的性能下降。需要注意的是，PPO best 的 average reward 略低于 Base，但 Pass@1 与 Base 相同。这表明 Base 在部分未全通过样本上可能获得更高部分分，而 PPO best 更集中地提升了全通过样本数量。
+
+\section{PPO 超参数消融实验}
+
+为了分析 PPO 训练稳定性，本文围绕 learning rate、KL 系数和 rollout 数量进行了多组消融实验。所有实验均从 SFT adapter 出发，区别在于 PPO update 的超参数和 rollout 来源。
+
+\subsection{learning rate 对结果的影响}
+
+在原始 reward 条件下，exp1 使用 learning rate 为 $1\times10^{-5}$，Pass@1 达到 0.6190；exp3 将 learning rate 降低到 $5\times10^{-6}$，Pass@1 为 0.5952。虽然 exp3 的 mean ratio 更接近 1，说明策略更新更保守，但最终效果不如 exp1。这说明在 42 条 rollout 的小规模设置下，过度降低学习率会削弱 PPO 对执行反馈的利用能力。
+
+在 reward\_v2 条件下也观察到类似现象。exp1\_reward\_v2 使用 $1\times10^{-5}$，Pass@1 达到 0.6667；exp2\_reward\_v2\_lr5e6 使用 $5\times10^{-6}$，Pass@1 为 0.6190。由此可见，在本文实验设置下，$1\times10^{-5}$ 更适合作为 PPO 更新学习率。
+
+\subsection{KL 系数对结果的影响}
+
+KL 系数用于限制更新后策略偏离参考策略。exp1 使用 KL 系数 0.02，Pass@1 为 0.6190；exp2 将 KL 系数降低到 0.01，Pass@1 降至 0.5476，且 mean ratio 接近 2。该结果说明，过弱的 KL 约束会导致策略偏移过大，使模型偏离 SFT 后已有的代码生成能力。
+
+在语言模型 PPO 中，KL 约束的作用不仅是保持训练稳定，也是在一定程度上保留基座模型和 SFT 模型中已有的通用语言建模能力。对于本文这种小规模代码数据场景，如果 KL 约束过弱，模型可能过度拟合少量 rollout 中的奖励信号，导致整体性能下降。因此，本文最终选择 KL 系数 0.02 作为主要设置。
+
+\subsection{rollout 数量对结果的影响}
+
+本文还比较了 42 条 rollout 与 100 条 rollout 的效果。直观上，更多 rollout 可能提供更丰富的反馈信号，但实验结果并未支持这一点。exp4 使用 rl\_train 中抽取的 100 条 rollout，learning rate 为 $1\times10^{-5}$，Pass@1 为 0.5714；exp5 在 100 条 rollout 基础上将 learning rate 降低到 $5\times10^{-6}$，Pass@1 仍为 0.5714。
+
+这一结果表明，rollout 数量并非越大越好。本文 PPO 实现属于单步近似版本，value 估计和 advantage 估计都较简单。当 rollout 数量扩大时，样本分布更复杂，但 update 机制没有同步增强，更多样本未必能转化为更稳定的优化收益。相比之下，42 条 rollout 与当前 update 强度更加匹配。
+
+完整 PPO 调参结果如表 \ref{tab:ppo-ablation} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{PPO 超参数消融结果}
+  \label{tab:ppo-ablation}
+  \begin{tabular}{llllrrr}
+    \toprule
+    实验组 & rollout & reward & lr & KL & Pass@1 & avg reward \\
+    \midrule
+    exp1 & 42 & 原始 & $1e^{-5}$ & 0.02 & 0.6190 & 0.6270 \\
+    exp2 & 42 & 原始 & $1e^{-5}$ & 0.01 & 0.5476 & 0.5794 \\
+    exp3 & 42 & 原始 & $5e^{-6}$ & 0.02 & 0.5952 & 0.6190 \\
+    exp4 & 100 & 原始 & $1e^{-5}$ & 0.02 & 0.5714 & 0.6111 \\
+    exp5 & 100 & 原始 & $5e^{-6}$ & 0.02 & 0.5714 & 0.6032 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{奖励函数消融实验}
+
+奖励函数是影响 PPO 效果的关键因素。本文比较了原始 reward、reward\_v2、reward\_v3 和 reward\_v3b。原始 reward 主要依赖测试通过比例；reward\_v2 增加代码可执行奖励和全通过奖励；reward\_v3 和 reward\_v3b 进一步加入 AST 相似度和函数签名匹配等结构奖励。
+
+奖励函数消融结果如表 \ref{tab:reward-ablation} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{奖励函数消融结果}
+  \label{tab:reward-ablation}
+  \begin{tabular}{llrrl}
+    \toprule
+    实验组 & reward 设置 & Pass@1 & avg reward & 结论 \\
+    \midrule
+    SFT baseline & reward\_v2 评测口径 & 0.5714 & 0.6524 & 新 reward 口径基线 \\
+    exp1 & 原始 reward & 0.6190 & 0.6270 & 首次优于 SFT \\
+    exp1\_reward\_v2 & 执行密集奖励 & 0.6667 & 0.7190 & 当前最佳 \\
+    exp2\_reward\_v2 & reward\_v2 + 小学习率 & 0.6190 & 0.6762 & 不如 exp1\_reward\_v2 \\
+    exp1\_reward\_v3 & 加入结构奖励 & 0.5952 & 0.7311 & reward 高但 Pass@1 低 \\
+    exp1\_reward\_v3b & 降低结构奖励权重 & 0.5952 & 0.6749 & 未改善 Pass@1 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+实验表明，reward\_v2 是本文最有效的奖励设计。相比原始 reward，reward\_v2 更密集，能够区分代码可执行、部分测试通过和全部测试通过等不同层级的输出质量。使用 reward\_v2 后，PPO 在 valid 上的 Pass@1 从 SFT 的 0.5714 提升到 0.6667。
+
+reward\_v3 和 reward\_v3b 的结果则说明，奖励函数并非越复杂越好。reward\_v3 的 average reward 达到 0.7311，高于 reward\_v2 的 0.7190，但 Pass@1 仅为 0.5952。这表明 AST 相似度和函数签名匹配等结构奖励会提高代理 reward 数值，却未必提升最终功能正确性。reward\_v3b 降低结构奖励权重后，Pass@1 仍未改善。因此，本文最终选择 reward\_v2 作为主奖励函数。
+
+\section{HumanEval 测试集泛化分析}
+
+为了验证模型是否具备跨数据集泛化能力，本文在 HumanEval 测试集上对 Base、SFT baseline 和 PPO best 进行最终评测。结果如表 \ref{tab:humaneval-main} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{HumanEval 测试集结果}
+  \label{tab:humaneval-main}
+  \begin{tabular}{lrrrr}
+    \toprule
+    模型 & Pass@1 & full pass & avg reward & execution failures \\
+    \midrule
+    Base & 0.5000 & 82/164 & 0.5457 & 7 \\
+    SFT baseline & 0.5244 & 86/164 & 0.5707 & 2 \\
+    PPO best & 0.5122 & 84/164 & 0.5610 & 0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+从表 \ref{tab:humaneval-main} 可以看出，SFT baseline 在 HumanEval 上略优于 Base，Pass@1 从 0.5000 提升到 0.5244；PPO best 的 Pass@1 为 0.5122，略低于 SFT baseline，但高于 Base。同时，PPO best 的 execution failures 为 0，说明经过执行反馈优化后，模型输出在可执行稳定性上有所改善。
+
+该结果说明，PPO 的主要收益集中在 MBPP valid 分布上，并未稳定迁移到 HumanEval 测试集。造成这一现象的原因可能包括：第一，PPO rollout 主要来自 MBPP 分布，模型优化方向更贴近 MBPP 题型；第二，本文 PPO update 规模较小，无法充分学习跨数据集泛化能力；第三，reward\_v2 虽然提高了执行反馈密度，但仍主要依赖当前测试代码，可能对验证集分布产生局部适配。
+
+\section{案例分析}
+
+为了进一步解释实验结果，本文选取典型样例比较 Base、SFT 和 PPO 的输出差异。案例分析可以更直观地说明 PPO 的作用：一方面，PPO 能够修复 SFT 的部分错误；另一方面，PPO 也可能损伤原本正确的边界条件处理。
+
+\subsection{PPO 修复 SFT 错误案例}
+
+第一个正向案例来自 HumanEval/37，任务要求对列表中偶数下标位置的元素排序，而奇数下标位置保持不变。Base 输出混入了额外测试和解释性文本，SFT 输出虽然尝试提取偶数下标元素，但使用了未定义变量 $i$，导致代码无法正确执行。PPO 输出如下：
+
+\begin{codeblock}[language=Python]
+def sort_even(l: list):
+    l_even = sorted(l[::2])
+    return [l_even[i//2] if i%2==0 else l[i] for i in range(len(l))]
+\end{codeblock}
+
+该实现显式构造偶数下标元素的排序列表，并通过 $i//2$ 将排序后的偶数位元素放回原位置，同时保留奇数下标元素不变，因此通过测试。该案例说明，执行反馈能够引导 PPO 修复 SFT 中的索引逻辑错误。
+
+第二个正向案例来自 HumanEval/67，任务要求从字符串中提取苹果和橘子数量，并用总水果数减去二者得到芒果数。SFT 输出使用 \texttt{s[0]} 和 \texttt{s[-1]} 拼接数字，只能处理个位数情形；PPO 输出如下：
+
+\begin{codeblock}[language=Python]
+def fruit_distribution(s,n):
+  return n - sum([int(i) for i in s.split() if i.isdigit()])
+\end{codeblock}
+
+该实现通过 \texttt{split()} 提取字符串中的数字并求和，更符合题意，也能处理多位数数量。该案例说明，PPO 在部分任务上能够减少 SFT 的硬编码倾向，提高实现的泛化性。
+
+\subsection{PPO 退化案例}
+
+负向案例来自 HumanEval/131，任务要求返回整数中所有奇数位数字的乘积，如果不存在奇数位数字则返回 0。Base 和 SFT 都显式维护 \texttt{has\_odd} 标志，因此能正确处理全偶数输入。PPO 输出如下：
+
+\begin{codeblock}[language=Python]
+def digits(n):
+  return reduce(lambda x,y: x*y, (int(i) for i in str(n) if int(i)%2!=0), 1)
+\end{codeblock}
+
+该实现能够计算存在奇数位数字时的乘积，但当输入所有数字均为偶数时，生成器为空，\texttt{reduce} 会返回初始值 1，而题目要求返回 0。因此，PPO 在该样例上损伤了 SFT 原有的边界条件处理能力。
+
+该案例说明，PPO 并不总是带来提升。由于本文使用的是小规模 rollout 和单步 PPO 更新，模型可能在部分样例上为了提升局部 reward 而牺牲原有边界条件能力。这也解释了为什么 PPO best 在 valid 上能够追平 Base，但在 HumanEval 测试集上略低于 SFT baseline。
+
+\subsection{方法能力边界分析}
+
+综合案例可以看出，执行反馈对代码生成优化具有明确价值，但也存在边界。对于索引逻辑、字符串数字提取等可以被测试用例直接约束的问题，PPO 有机会通过 reward 信号修复 SFT 输出错误；但对于测试覆盖不足或边界条件复杂的问题，PPO 可能学习到通过当前样本的短路径，而不是获得更稳健的通用算法。
+
+因此，本文方法更适合被理解为一种面向当前任务分布的策略调整方法，而不是一次训练即可全面提升模型通用编程能力的方法。若要进一步提升泛化能力，需要扩大 rollout 数据规模，引入更多分布多样的测试样本，并设计更稳健的 reward 与 critic 训练机制。
+
+\section{实验结论}
+
+综合以上实验，可以得到以下结论。
+
+第一，本文实现的 SFT+PPO 训练闭环是可行的。从数据处理、SFT 训练、rollout 收集、执行测试、reward 计算到 PPO update，各模块均已完成并通过实验验证。
+
+第二，在 MBPP valid 上，PPO best 将 SFT baseline 的 Pass@1 从 0.5714 提升到 0.6667，说明执行反馈 PPO 能够修复小样本 SFT 后模型在当前分布上的性能下降。
+
+第三，PPO 对超参数和 reward 设计较敏感。单独降低 KL 系数会导致策略偏移过大，单独降低学习率会削弱收益，扩大 rollout 数量也没有自动提升效果。当前最佳结果来自 42 条 rollout、learning rate 为 $1\times10^{-5}$、KL 系数为 0.02 和 reward\_v2 的组合。
+
+第四，reward\_v2 是当前最有效的奖励函数。相比原始 reward，它提供了更密集的执行反馈；相比 reward\_v3 和 reward\_v3b，它更直接地对齐测试通过率和功能正确性。
+
+第五，当前方法的泛化能力仍有限。PPO best 在 HumanEval 上略低于 SFT baseline，说明当前 PPO 更偏向验证集分布优化，尚未稳定提升跨数据集测试表现。
+
+\section{本章小结}
+
+本章对本文方法进行了实验验证和结果分析。首先，本章介绍了实验环境、模型设置、数据集统计和 runtime 复核结果。随后，本章比较了 Base、SFT 和 PPO best 的主实验结果，证明 reward\_v2 条件下的 PPO 能够在 MBPP valid 上显著改善 SFT baseline。接着，本章通过超参数消融和奖励函数消融说明 PPO 效果依赖于合理的更新强度和 reward 设计。最后，本章通过 HumanEval 泛化分析和案例分析指出，当前方法仍存在跨数据集泛化不足和边界条件退化问题。下一章将总结全文工作，并讨论后续改进方向。

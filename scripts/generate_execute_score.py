@@ -13,7 +13,13 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from simple_openhands.rl.bridge import align_entry_point
+from simple_openhands.rl.bridge import (
+    align_entry_point,
+    clean_generated_solution,
+    compute_reward,
+    execute_test_code,
+    uses_humaneval_check,
+)
 
 try:
     from peft import PeftModel
@@ -69,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True when loading model/tokenizer.",
+    )
+    parser.add_argument(
+        "--reward-mode",
+        choices=("v2", "v3", "v3b"),
+        default="v2",
+        help="Reward function version used for average_reward.",
     )
     return parser.parse_args()
 
@@ -165,38 +177,53 @@ def extract_asserts(test_code: str) -> list[str]:
     return [line for line in lines if line.startswith("assert ")]
 
 
-def score_solution(generated_solution: str, record: dict[str, Any]) -> dict[str, Any]:
+def score_solution(
+    generated_solution: str,
+    record: dict[str, Any],
+    reward_mode: str = "v2",
+) -> dict[str, Any]:
     namespace: dict[str, Any] = {"__builtins__": __builtins__}
-    test_cases = extract_asserts(str(record["test_code"]))
+    cleaned_solution = clean_generated_solution(generated_solution)
     aligned_solution = align_entry_point(
-        generated_solution=generated_solution,
+        generated_solution=cleaned_solution,
         entry_point=str(record["entry_point"]),
     )
 
     try:
         exec(aligned_solution + "\n", namespace, namespace)
     except Exception:
+        test_code = str(record["test_code"])
         return {
             "reward": 0.0,
             "passed": False,
             "passed_tests": 0,
-            "total_tests": len(test_cases),
+            "total_tests": 1 if uses_humaneval_check(test_code) else len(extract_asserts(test_code)),
             "error_type": "generation_execution_error",
             "content": traceback.format_exc(),
+            "reward_components": {
+                "executable": 0.0,
+                "entry_point": 0.0,
+                "ast": 0.0,
+                "signature": 0.0,
+                "test_pass_ratio": 0.0,
+                "full_pass": 0.0,
+            },
         }
 
-    passed_tests = 0
-    failure_trace = None
-    for test_case in test_cases:
-        try:
-            exec(test_case + "\n", namespace, namespace)
-            passed_tests += 1
-        except Exception:
-            if failure_trace is None:
-                failure_trace = traceback.format_exc()
-
-    total_tests = len(test_cases)
-    reward = 0.0 if total_tests == 0 else round(passed_tests / total_tests, 4)
+    passed_tests, total_tests, failure_trace = execute_test_code(
+        namespace=namespace,
+        record=record,
+    )
+    reward, reward_components = compute_reward(
+        record=record,
+        namespace=namespace,
+        cleaned_solution=cleaned_solution,
+        aligned_solution=aligned_solution,
+        passed_tests=passed_tests,
+        total_tests=total_tests,
+        execution_ok=True,
+        reward_mode=reward_mode,
+    )
     passed = passed_tests == total_tests
 
     return {
@@ -206,6 +233,7 @@ def score_solution(generated_solution: str, record: dict[str, Any]) -> dict[str,
         "total_tests": total_tests,
         "error_type": None if passed else "partial_or_failed_tests",
         "content": "" if passed else (failure_trace or ""),
+        "reward_components": reward_components,
     }
 
 
@@ -248,7 +276,11 @@ def main() -> int:
             prompt_template=args.prompt_template,
             max_new_tokens=args.max_new_tokens,
         )
-        score = score_solution(generated_solution, record)
+        score = score_solution(
+            generated_solution=generated_solution,
+            record=record,
+            reward_mode=args.reward_mode,
+        )
         scored_records.append(
             {
                 "task_id": record["task_id"],
@@ -268,6 +300,7 @@ def main() -> int:
         "input_file": str(input_path),
         "base_model_path": args.base_model_path,
         "adapter_path": args.adapter_path,
+        "reward_mode": args.reward_mode,
         **summarize(scored_records),
     }
     write_jsonl(out_dir / "scored_rollouts.jsonl", scored_records)

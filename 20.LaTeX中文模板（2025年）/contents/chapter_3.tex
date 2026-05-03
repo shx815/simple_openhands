@@ -1,0 +1,274 @@
+% !TEX root = ../main.tex
+
+\chapter{基于执行反馈的强化学习代码生成方法}
+
+本章介绍本文提出并实现的基于执行反馈的强化学习代码生成方法。整体流程以预训练代码模型为基础，先通过监督微调获得任务适配模型，再利用模型生成代码后的执行结果构造奖励，最后采用 PPO 对模型策略进行进一步优化。与仅依赖参考答案似然的训练方式相比，本文方法将代码是否可执行、是否通过测试、是否满足入口函数约束等信息纳入优化过程，使训练目标更加接近代码生成任务的功能正确性要求。
+
+\section{方法总体框架}
+
+本文方法整体由数据构建、SFT 热启动、代码生成、执行反馈、奖励计算和 PPO 更新六个部分组成。首先，将 MBPP 和 HumanEval 原始数据整理为统一字段格式，并根据训练目标分别构造 SFT 数据和 RL 数据。其次，使用 SFT 数据对 Qwen2.5-Coder-1.5B 进行 LoRA 微调，使模型适配代码生成任务格式。随后，在 PPO 阶段，模型根据 prompt 生成代码，系统对生成结果进行清洗和入口函数对齐，并在本地执行环境中运行测试代码。测试执行结果被转化为 reward 和 advantage，最终用于 PPO 策略更新。
+
+本文方法可以抽象为如下流程：
+
+\begin{enumerate}
+  \item 输入代码生成数据集，统一字段并划分 train、valid 和 test。
+  \item 构造 SFT 样本，将问题描述转换为 prompt，将标准答案转换为 response。
+  \item 使用 LoRA 对基座代码模型进行监督微调，得到 SFT adapter。
+  \item 使用当前策略模型生成候选代码，并记录生成文本、token 数量和旧策略 log probability。
+  \item 清洗生成代码，对齐入口函数，并在本地执行测试代码。
+  \item 根据执行结果计算 reward，并对一个 rollout batch 计算 advantage。
+  \item 使用 PPO clipped objective、value loss 和 KL penalty 更新 LoRA adapter。
+  \item 对更新后的模型在验证集和测试集上重新执行生成、测试与打分。
+\end{enumerate}
+
+从训练目标上看，SFT 阶段主要学习“如何按照给定格式生成代码”，PPO 阶段则进一步学习“什么样的代码更可能通过执行测试”。因此，本文方法不是用 PPO 替代 SFT，而是将 SFT 作为 PPO 的初始化策略。这样既能利用监督学习的稳定性，又能利用执行反馈对功能正确性进行进一步优化。
+
+\section{数据集构建与格式统一}
+
+本文使用 MBPP 和 HumanEval 两个代码生成数据集。MBPP 主要用于训练和验证，HumanEval 用于最终测试。为了使 SFT、PPO 和评测脚本能够共享同一套数据，本文首先将原始数据统一转换为 master 格式。统一后的每条样本包含任务编号、数据来源、问题描述、参考答案、入口函数、测试代码等字段。其核心字段如表 \ref{tab:master-fields} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{统一 master 数据字段}
+  \label{tab:master-fields}
+  \begin{tabular}{ll}
+    \toprule
+    字段名 & 含义 \\
+    \midrule
+    \texttt{task\_id} & 样本唯一编号 \\
+    \texttt{source} & 数据来源，取值为 MBPP 或 HumanEval \\
+    \texttt{prompt} & 自然语言题目描述或函数文档字符串 \\
+    \texttt{canonical\_solution} & 参考答案代码 \\
+    \texttt{entry\_point} & 需要生成的目标函数名 \\
+    \texttt{test\_code} & 用于执行验证的测试代码 \\
+    \texttt{metadata} & 原始数据中的附加信息 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+在 master 数据基础上，本文进一步构造 SFT 和 RL 两种格式。SFT 数据面向监督微调，主要保留 \texttt{prompt} 和 \texttt{response}，其中 \texttt{response} 来自参考答案。RL 数据面向执行反馈训练，除了 \texttt{prompt} 外，还保留 \texttt{canonical\_solution}、\texttt{entry\_point} 和 \texttt{test\_code}，用于后续执行测试和 reward 计算。
+
+数据构建过程主要由两个脚本完成。\texttt{prepare\_datasets.py} 负责读取原始 MBPP 和 HumanEval 数据，解析参考答案、入口函数和测试代码，并输出统一 master、SFT 和 RL 文件。\texttt{split\_datasets.py} 负责在 MBPP 数据上按照固定随机种子划分训练集和验证集，同时保留 HumanEval 作为测试集。最终数据划分为 MBPP train 385 条、MBPP valid 42 条、HumanEval test 164 条，总计 591 条样本。为了保证执行反馈可靠，本文还对标准答案进行了 runtime 复核，确认所有样本的标准答案在对应测试代码下均可通过。
+
+\section{监督微调数据构造方法}
+
+SFT 阶段的目标是使模型学习代码生成任务的基本输出格式。本文使用如下 prompt 模板构造训练输入：
+
+\begin{codeblock}[language={}]
+### Problem:
+{prompt}
+
+### Solution:
+\end{codeblock}
+
+其中，\texttt{\{prompt\}} 为数据集中原始问题描述。模型需要在该模板后生成对应函数实现。训练样本的 response 为标准答案代码。为了避免模型学习无关文本，SFT 训练时仅对 response 部分计算 loss，而 prompt 部分的 label 被置为忽略值。这样模型不会被优化为复现输入 prompt，而是学习在给定问题后生成解决方案。
+
+本文 SFT 数据格式如表 \ref{tab:sft-fields} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{SFT 数据字段}
+  \label{tab:sft-fields}
+  \begin{tabular}{ll}
+    \toprule
+    字段名 & 含义 \\
+    \midrule
+    \texttt{task\_id} & 样本编号 \\
+    \texttt{source} & 数据来源 \\
+    \texttt{prompt} & 输入问题描述 \\
+    \texttt{response} & 参考答案代码 \\
+    \texttt{entry\_point} & 目标函数名 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+具体实现中，\texttt{train\_sft.py} 定义了 \texttt{SFTJsonlDataset}，负责读取 JSONL 数据并将 prompt 与 response 拼接为完整训练文本。数据整理器 \texttt{DataCollatorForCausalSFT} 对不同长度样本进行 padding，并使用 $-100$ 屏蔽不参与损失计算的位置。模型训练使用 LoRA，仅更新低秩 adapter 参数，从而降低显存占用并提高训练效率。
+
+SFT 阶段输出的 adapter 作为后续 PPO 的初始策略。这样设计的原因是，直接对未适配任务格式的基座模型进行 PPO 更新会导致 rollout 质量较差，执行反馈信号稀疏；而经过 SFT 后，模型已经能够较稳定地生成函数代码，PPO 可以在此基础上进一步优化功能正确性。
+
+\section{代码生成与执行反馈流程}
+
+PPO 阶段的关键是将模型生成的代码转化为可用于强化学习的执行反馈。本文实现了本地代码执行环境 \texttt{LocalCodeSandboxEnv}，用于完成 prompt 到 reward 的转换。该环境并非完整系统沙箱，而是面向本文数据集的轻量本地执行器，负责在受控命名空间中执行生成代码和测试代码。
+
+代码生成首先由 \texttt{CodePolicy} 完成。给定 prompt 后，模型按照 SFT 阶段使用的模板构造输入，并生成最大长度受限的 response。生成结果中可能包含 Markdown 代码块、解释性文本、多余测试代码或重复题目描述，因此不能直接执行。为此，本文设计了 \texttt{clean\_generated\_solution} 函数，对生成文本进行清洗，主要包括：
+
+\begin{enumerate}
+  \item 提取 Markdown 代码块中的 Python 代码；
+  \item 去除 \texttt{### Problem}、\texttt{### Solution}、\texttt{### Test} 等额外段落；
+  \item 截断明显不属于函数实现的解释性文本；
+  \item 保留最可能的函数定义代码片段。
+\end{enumerate}
+
+由于模型生成的函数名可能与测试代码要求的入口函数不一致，本文进一步进行入口函数对齐。如果生成代码中存在函数定义但函数名与 \texttt{entry\_point} 不一致，系统会尝试将首个函数定义重命名为目标入口函数。这一处理可以减少因函数名不匹配造成的非功能性失败，使评测更关注生成代码的算法逻辑。
+
+执行反馈流程如算法 \ref{alg:execute-score} 所示。
+
+\begin{algorithm}[!htp]
+  \caption{代码生成与执行反馈流程}
+  \label{alg:execute-score}
+  \KwIn{问题描述 $x$，入口函数 $e$，测试代码 $T$，当前策略模型 $\pi_{\theta}$}
+  \KwOut{生成代码 $y$，奖励 $r$，执行信息 info}
+  根据 prompt 模板构造模型输入\;
+  使用 $\pi_{\theta}$ 生成候选代码文本 $y_{\mathrm{raw}}$\;
+  对 $y_{\mathrm{raw}}$ 进行代码清洗，得到 $y_{\mathrm{clean}}$\;
+  将 $y_{\mathrm{clean}}$ 中的函数名与入口函数 $e$ 对齐\;
+  在本地命名空间中执行生成代码\;
+  执行测试代码 $T$，统计通过测试数和总测试数\;
+  根据执行结果计算 reward 和错误类型\;
+  返回生成代码、reward 和执行信息\;
+\end{algorithm}
+
+对于 MBPP 数据，测试代码通常由若干 assert 语句组成，系统逐条执行并统计通过数量。对于 HumanEval 数据，测试代码通常包含 \texttt{check(candidate)} 函数，系统会识别该结构并将生成函数作为 candidate 传入。若执行过程中出现异常，则记录错误类型和 traceback，并将该样本标记为执行失败或部分测试失败。
+
+\section{奖励函数设计}
+
+奖励函数是本文方法的核心。本文围绕执行反馈设计了从简单到复杂的多种 reward，用于分析不同反馈信号对 PPO 训练的影响。
+
+\subsection{原始测试通过率奖励}
+
+最直接的奖励设计是基于测试通过比例。设某个样本共有 $N$ 个测试点，生成代码通过了 $N_{\mathrm{pass}}$ 个测试点，则测试通过比例为：
+
+\begin{equation}
+  p=\frac{N_{\mathrm{pass}}}{N}.
+\end{equation}
+
+原始 reward 可以直接取 $r=p$。该设计简单直观，能够反映代码通过测试的程度。然而，在实际训练中，仅依赖测试通过比例仍然存在反馈稀疏问题。例如，某段代码已经语法正确且入口函数正确，但由于一个边界条件失败而无法全部通过测试，其 reward 与完全不可执行代码之间的区分可能不够明显。因此，本文进一步设计了更密集的 reward\_v2。
+
+\subsection{reward\_v2 密集执行反馈奖励}
+
+reward\_v2 的设计目标是在保持执行正确性导向的同时，为代码生成过程中的中间质量提供更密集的正向反馈。该 reward 由三部分组成：
+
+\begin{equation}
+  r_{\mathrm{v2}}
+  = 0.1 \cdot I_{\mathrm{exec}}
+  + 0.8 \cdot p
+  + 0.1 \cdot I_{\mathrm{full}},
+\end{equation}
+
+其中，$I_{\mathrm{exec}}$ 表示代码是否可执行，$p$ 表示测试通过比例，$I_{\mathrm{full}}$ 表示是否通过全部测试。最终 reward 被截断到 $[0,1]$ 区间。
+
+该设计体现了代码生成质量的层级结构。首先，代码需要能够被解释器执行，因此可执行性应获得基础奖励。其次，代码通过的测试越多，说明功能越接近正确，应获得更高奖励。最后，全部测试通过代表该样本在当前测试集下功能正确，因此给予额外奖励。相比原始 reward，reward\_v2 能够区分完全不可执行、部分正确和完全正确的代码，更适合作为 PPO 的优化信号。
+
+\subsection{reward\_v3 与 reward\_v3b 结构奖励尝试}
+
+受执行反馈代码生成相关工作的启发，本文进一步尝试将代码结构信息纳入 reward。reward\_v3 在 reward\_v2 思路基础上加入入口函数存在性、AST 结构相似度和函数签名匹配奖励。其设计形式为：
+
+\begin{equation}
+  r_{\mathrm{v3}}
+  =0.10 I_{\mathrm{exec}}
+  +0.10 I_{\mathrm{entry}}
+  +0.15 S_{\mathrm{AST}}
+  +0.10 S_{\mathrm{sig}}
+  +0.45 p
+  +0.10 I_{\mathrm{full}},
+\end{equation}
+
+其中，$I_{\mathrm{entry}}$ 表示生成代码是否包含目标入口函数，$S_{\mathrm{AST}}$ 表示生成代码与参考答案的 AST 节点类型相似度，$S_{\mathrm{sig}}$ 表示函数参数数量是否与参考答案匹配。AST 相似度通过统计生成代码和参考答案中的 AST 节点类型分布计算，旨在衡量两段代码在结构上的接近程度。
+
+考虑到结构奖励可能过度影响功能正确性目标，本文又设计 reward\_v3b，降低结构奖励权重，提高测试通过比例权重：
+
+\begin{equation}
+  r_{\mathrm{v3b}}
+  =0.05 I_{\mathrm{exec}}
+  +0.05 I_{\mathrm{entry}}
+  +0.05 S_{\mathrm{AST}}
+  +0.05 S_{\mathrm{sig}}
+  +0.70 p
+  +0.10 I_{\mathrm{full}}.
+\end{equation}
+
+reward\_v3 和 reward\_v3b 的目的并不是直接替代 reward\_v2，而是用于验证结构相似度奖励在本文小数据代码生成场景下是否有效。后续实验表明，结构奖励虽然能改变 average reward，但未能提升 Pass@1，因此本文最终采用 reward\_v2 作为主要奖励函数。
+
+\section{PPO 训练流程设计}
+
+本文 PPO 训练流程由 rollout 收集和 policy update 两个阶段组成。rollout 收集阶段使用当前策略模型生成代码并执行测试，得到包含 prompt、生成代码、reward、旧策略 log probability 和 advantage 的样本。policy update 阶段读取 rollout 文件，计算 PPO loss 并更新 LoRA adapter。
+
+在 rollout 收集阶段，本文使用 \texttt{ppo\_rollout\_loop.py} 完成如下操作：
+
+\begin{enumerate}
+  \item 从 RL 数据文件读取样本；
+  \item 使用当前 policy 生成代码；
+  \item 调用本地执行环境计算 reward；
+  \item 记录旧策略下生成 response 的 log probability；
+  \item 对一个 batch 内的 reward 减去平均 reward，得到简化 advantage；
+  \item 将 rollout 写入 \texttt{rollouts.jsonl}。
+\end{enumerate}
+
+早期实现中，advantage 使用 batch reward 均值作为 baseline：
+
+\begin{equation}
+  A_i = r_i - \bar{r}.
+\end{equation}
+
+后续 PPO update 中进一步引入 scalar value head，对每个样本估计 value，并采用单步 GAE 近似：
+
+\begin{equation}
+  R_i = r_i,\quad A_i = r_i - V(s_i).
+\end{equation}
+
+由于本文将一次完整代码生成视为单步 episode，因此 return 等于该样本的 reward。该设计简化了多步 trajectory 的复杂度，适合本文在小规模数据和有限算力条件下验证执行反馈优化效果。
+
+在 policy update 阶段，本文使用 \texttt{ppo\_update.py} 对 LoRA adapter 进行更新。对于每条 rollout 样本，脚本重新计算当前策略下 response 的 log probability，并与旧策略 log probability 构造概率比：
+
+\begin{equation}
+  \rho_i=\exp(\log \pi_{\theta}(y_i|x_i)-\log \pi_{\theta_{\mathrm{old}}}(y_i|x_i)).
+\end{equation}
+
+策略损失采用 PPO 裁剪目标：
+
+\begin{equation}
+  \mathcal{L}_{\mathrm{policy}}
+  =-\min(\rho_i A_i,\mathrm{clip}(\rho_i,1-\epsilon,1+\epsilon)A_i).
+\end{equation}
+
+值函数损失采用均方误差：
+
+\begin{equation}
+  \mathcal{L}_{\mathrm{value}}=(V(s_i)-R_i)^2.
+\end{equation}
+
+同时，为限制更新后策略偏离参考策略过远，本文引入近似 KL penalty。最终总损失为：
+
+\begin{equation}
+  \mathcal{L}
+  =
+  \mathcal{L}_{\mathrm{policy}}
+  +c_v\mathcal{L}_{\mathrm{value}}
+  +c_{kl}\mathcal{L}_{\mathrm{KL}}.
+\end{equation}
+
+其中，$c_v$ 为 value loss 权重，$c_{kl}$ 为 KL loss 权重。本文实验中主要设置 $c_v=0.5$，$c_{kl}=0.02$，并在消融实验中比较不同学习率、KL 系数和 rollout 数量对结果的影响。
+
+\section{系统实现与关键模块}
+
+本文实现了一个围绕代码生成 SFT 和 PPO 的轻量实验系统。系统主要模块如表 \ref{tab:system-modules} 所示。
+
+\begin{table}[!htp]
+  \centering
+  \caption{系统关键模块}
+  \label{tab:system-modules}
+  \begin{tabular}{ll}
+    \toprule
+    模块或脚本 & 功能 \\
+    \midrule
+    \texttt{prepare\_datasets.py} & 原始数据读取、字段标准化、测试代码构造 \\
+    \texttt{split\_datasets.py} & 数据划分和 SFT/RL 格式生成 \\
+    \texttt{train\_sft.py} & LoRA SFT 训练 \\
+    \texttt{generate\_execute\_score.py} & 生成代码、执行测试、计算 reward \\
+    \texttt{ppo\_rollout\_loop.py} & PPO rollout 收集和 advantage 预处理 \\
+    \texttt{ppo\_update.py} & PPO policy update、value head 训练和 adapter 保存 \\
+    \texttt{simple\_openhands/rl/bridge.py} & 代码清洗、执行环境、reward 计算和策略封装 \\
+    \texttt{simple\_openhands/rl/ppo.py} & value head 和单步 GAE 辅助函数 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+系统的数据流如下。首先，数据处理脚本生成 \texttt{data/final} 目录下的 SFT 和 RL 文件。然后，SFT 训练脚本读取 \texttt{sft\_train.jsonl} 和 \texttt{sft\_valid.jsonl}，输出 LoRA adapter。接着，rollout 脚本加载基座模型和 adapter，在 RL 数据上生成代码并写出 \texttt{rollouts.jsonl}。PPO 更新脚本读取 rollout 文件，更新 adapter 并保存新的 PPO 模型。最后，评测脚本在 valid 和 HumanEval test 上重新生成代码并执行测试，输出 \texttt{summary.json} 和 \texttt{scored\_rollouts.jsonl}。
+
+为了支持论文实验分析，系统还记录了每个样本的任务编号、生成代码、reward、是否通过、通过测试数量、错误类型和 reward 组成项。这些信息不仅用于计算总体指标，也用于后续案例分析。例如，通过比较 Base、SFT 和 PPO 在同一任务上的生成代码，可以判断 PPO 是修复了 SFT 的错误，还是造成了边界条件退化。
+
+需要说明的是，本文实现的 PPO 框架是面向本科论文实验的简化版本。它已经包含 policy loss、value loss、KL penalty、单步 advantage 和执行反馈 reward，但尚未实现完整多步 trajectory、复杂 critic 训练和大规模分布式 rollout。因此，本文更关注在小规模数据和有限算力条件下验证执行反馈强化学习代码生成的可行性，而不是构建工业级大规模 RL 系统。
+
+\section{本章小结}
+
+本章详细介绍了本文提出的基于执行反馈的强化学习代码生成方法。首先，本章给出了整体框架，说明 SFT 热启动和 PPO 执行反馈优化之间的关系。随后，本章介绍了 MBPP 和 HumanEval 数据的字段统一、SFT/RL 数据构造和 runtime 复核流程。接着，本章说明了代码生成后的清洗、入口函数对齐和本地执行反馈流程，并重点介绍了原始 reward、reward\_v2、reward\_v3 和 reward\_v3b 的设计。最后，本章给出了 PPO rollout 收集、单步 advantage 估计、policy update 和系统关键模块。下一章将在此方法基础上，进一步给出实验设置、主实验结果、消融实验和案例分析。

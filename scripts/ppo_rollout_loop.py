@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Pass trust_remote_code=True when loading the model.",
     )
+    parser.add_argument(
+        "--reward-mode",
+        choices=("v2", "v3", "v3b"),
+        default="v2",
+        help="Reward function version used for rollout collection.",
+    )
     return parser.parse_args()
 
 
@@ -95,7 +101,7 @@ def main() -> int:
     if args.limit is not None:
         records = records[: args.limit]
 
-    env = LocalCodeSandboxEnv(records)
+    env = LocalCodeSandboxEnv(records, reward_mode=args.reward_mode)
     policy = CodePolicy(
         base_model_path=args.base_model_path,
         trust_remote_code=args.trust_remote_code,
@@ -146,6 +152,7 @@ def main() -> int:
         "input_file": str(input_path),
         "base_model_path": args.base_model_path,
         "adapter_path": args.adapter_path,
+        "reward_mode": args.reward_mode,
         **summarize(rollouts),
         "note": "This script completes rollout collection, local execution, reward computation, and advantage preprocessing for the next PPO update step.",
     }

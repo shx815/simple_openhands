@@ -1,0 +1,28 @@
+% !TEX root = ../main.tex
+
+\begin{abstract}[zh]
+\addcontentsline{toc}{chapter}{摘 \quad 要}
+随着大语言模型和代码大模型的发展，基于自然语言描述自动生成程序代码已经成为软件工程和人工智能交叉领域的重要研究方向。现有代码生成模型通常先经过大规模预训练，再通过监督微调适配特定任务格式。然而，监督微调主要优化参考代码的 token 级似然，与代码生成任务最终关注的功能正确性并不完全一致。对于代码任务而言，生成结果不仅需要语法正确，还需要能够执行并通过测试用例。因此，如何利用代码执行结果构建反馈信号，并进一步优化模型生成策略，是提升代码生成可靠性的关键问题。
+
+本文围绕基于执行反馈的强化学习代码生成方法展开研究，构建了从数据整理、监督微调到 PPO 强化学习优化的完整实验流程。首先，本文基于 MBPP 和 HumanEval 数据集构造统一格式的数据文件，将原始样本整理为 SFT 数据和 RL 数据，并对标准答案进行 runtime 复核，确保测试代码和入口函数可用。其次，本文以 Qwen2.5-Coder-1.5B 作为基座模型，采用 LoRA 进行监督微调，得到 SFT baseline。随后，本文实现了代码生成、代码清洗、入口函数对齐、本地执行测试、奖励计算、优势估计和 PPO 更新等关键模块，形成基于执行反馈的代码生成强化学习闭环。
+
+在奖励函数设计方面，本文比较了原始测试通过率奖励、reward\_v2、reward\_v3 和 reward\_v3b 等多种形式。其中，reward\_v2 将代码可执行性、测试通过比例和全部测试通过奖励结合起来，为 PPO 提供更密集的执行反馈；reward\_v3 和 reward\_v3b 进一步尝试引入 AST 结构相似度和函数签名匹配奖励，用于分析结构奖励的实际效果。实验结果表明，在 MBPP 验证集上，SFT baseline 的 Pass@1 为 0.5714，采用 reward\_v2 的 PPO best 达到 0.6667，追平 Base 模型表现，说明执行反馈 PPO 能够修复小样本 SFT 后模型在验证集上的性能下降。在 HumanEval 测试集上，Base、SFT baseline 和 PPO best 的 Pass@1 分别为 0.5000、0.5244 和 0.5122，表明当前 PPO 的增益主要集中在验证集分布上，跨数据集泛化能力仍有不足。消融实验进一步表明，reward\_v2 是当前最有效的奖励设计，而加入结构相似度的 reward\_v3 和 reward\_v3b 未能提升 Pass@1。
+
+综上，本文验证了基于执行反馈的 PPO 优化在小规模代码生成任务中的可行性，证明执行测试结果可以作为有效奖励信号改善 SFT 后模型的部分生成行为。同时，实验也表明，强代码基座模型本身已经具备较高能力，小规模 SFT 和 PPO 并不必然全面超过基座模型，且当前方法在测试集泛化、奖励设计和 PPO 训练稳定性方面仍存在改进空间。
+\end{abstract}
+
+{
+\newfontface{\arial}{Arial}[Scale=0.94]
+\ctexset{chapter/format+={\arial}}
+\begin{abstract}[en]
+\addcontentsline{toc}{chapter}{ABSTRACT}
+With the rapid development of large language models and code-oriented foundation models, generating program code from natural language descriptions has become an important research topic at the intersection of software engineering and artificial intelligence. Existing code generation models are usually pretrained on large-scale corpora and then adapted to downstream tasks through supervised fine-tuning. However, supervised fine-tuning mainly optimizes token-level likelihood against reference solutions, which is not fully aligned with the functional correctness required by code generation tasks. For generated code, syntactic validity is not sufficient; the code must also be executable and pass the corresponding test cases. Therefore, how to use execution results as feedback signals and further optimize the generation policy is a key problem for improving the reliability of code generation models.
+
+This thesis studies reinforcement learning for code generation based on execution feedback, and builds a complete experimental pipeline from data processing and supervised fine-tuning to PPO-based policy optimization. First, MBPP and HumanEval are converted into unified data formats for SFT and RL training, and runtime validation is conducted to ensure that the reference solutions, entry points, and test code are executable. Second, Qwen2.5-Coder-1.5B is used as the base model, and LoRA-based supervised fine-tuning is applied to obtain the SFT baseline. Then, this thesis implements the key components of an execution-feedback learning loop, including code generation, output cleaning, entry-point alignment, local test execution, reward computation, advantage estimation, and PPO policy update.
+
+For reward design, this thesis compares several reward functions, including the original test-pass-ratio reward, reward\_v2, reward\_v3, and reward\_v3b. reward\_v2 combines executability, test pass ratio, and full-pass bonus to provide denser execution feedback for PPO. reward\_v3 and reward\_v3b further introduce AST structural similarity and function signature matching to examine whether structural rewards can improve code generation performance. Experimental results show that on the MBPP validation set, the SFT baseline achieves a Pass@1 of 0.5714, while the best PPO model with reward\_v2 achieves 0.6667, matching the Base model. This indicates that PPO with execution feedback can recover the performance drop caused by small-scale SFT on the validation distribution. On the HumanEval test set, the Pass@1 scores of Base, SFT baseline, and PPO best are 0.5000, 0.5244, and 0.5122, respectively, showing that the improvement of PPO mainly appears on the validation distribution and does not fully transfer to the cross-dataset test setting. Ablation experiments further show that reward\_v2 is the most effective reward design in this work, while reward\_v3 and reward\_v3b with structural similarity rewards do not improve Pass@1.
+
+In summary, this thesis verifies the feasibility of PPO optimization with execution feedback for small-scale code generation tasks, and shows that execution results can serve as useful reward signals to improve part of the model behavior after SFT. At the same time, the experiments also indicate that a strong code base model already has considerable code generation capability, and small-scale SFT and PPO do not necessarily outperform the base model in all settings. The current method still has limitations in cross-dataset generalization, reward design, and PPO training stability.
+
+\end{abstract}
+}
