@@ -8,6 +8,9 @@ if ! command -v docker >/dev/null 2>&1 && [ -x "$HOME/.docker/bin/docker" ]; the
     export PATH="$HOME/.docker/bin:$PATH"
 fi
 
+image=simple-openhands:latest
+dockerfile=Dockerfile
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -41,30 +44,16 @@ check_docker() {
     log_success "Docker is running"
 }
 
-# 清理旧容器和镜像
+# 替换同名容器
 cleanup() {
-    log_info "Cleaning up old containers and images..."
-    
+    log_info "Checking for an existing container..."
+
     # 停止并删除旧容器
-    if docker ps -a --format "table {{.Names}}" | grep -q "simple-openhands"; then
+    if docker ps -a --format "{{.Names}}" | grep -qx "simple-openhands"; then
         log_info "Stopping and removing old container..."
         docker stop simple-openhands 2>/dev/null || true
         docker rm simple-openhands 2>/dev/null || true
         log_success "Old container cleaned up"
-    fi
-    
-    # 检查是否有同名镜像
-    if docker images --format "table {{.Repository}}" | grep -q "^simple-openhands$"; then
-        log_info "Found existing image: simple-openhands"
-        read -p "Do you want to remove old image and force rebuild? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Removing old image..."
-            docker rmi simple-openhands 2>/dev/null || true
-            log_success "Old image removed"
-        fi
-    else
-        log_info "No existing image found, will build new one"
     fi
 }
 
@@ -73,8 +62,8 @@ build_linux_image() {
     log_info "Building Linux Docker image..."
     
     # 检查是否存在Dockerfile
-    if [ ! -f "Dockerfile" ]; then
-        log_error "Dockerfile not found in current directory"
+    if [ ! -f "$dockerfile" ]; then
+        log_error "$dockerfile not found in current directory"
         exit 1
     fi
     
@@ -85,7 +74,7 @@ build_linux_image() {
     echo
     
     # 构建Linux镜像
-    if docker build -f Dockerfile -t simple-openhands .; then
+    if docker build -f "$dockerfile" -t "$image" .; then
         log_success "Linux image built successfully"
     else
         log_error "Failed to build Linux image"
@@ -108,13 +97,16 @@ start_container() {
     log_info "Starting container..."
     
     local bind_host=${OH_BIND_HOST:-127.0.0.1}
+    local ports=(-p "${bind_host}:8000:8000")
+    if [[ "$dockerfile" == Dockerfile.full ]]; then
+        ports+=(-p 127.0.0.1:3000:3000)
+    fi
     docker run -d --name simple-openhands \
-        -p "${bind_host}:8000:8000" \
-        -p 127.0.0.1:3000:3000 \
+        "${ports[@]}" \
         -e OH_API_TOKEN \
         -v "$(pwd)/workspace:/simple_openhands/workspace" \
         -e WORK_DIR=/simple_openhands/workspace \
-        simple-openhands
+        "$image"
     
     if [ $? -eq 0 ]; then
         log_success "Container started successfully"
@@ -173,6 +165,31 @@ check_container_status() {
 
 # 运行测试
 run_tests() {
+    if [[ "$dockerfile" == Dockerfile ]]; then
+        log_info "Checking the base runtime's Shell API..."
+        docker exec -i simple-openhands python - <<'PY'
+import json
+import os
+from urllib.request import Request, urlopen
+
+headers = {"Content-Type": "application/json"}
+token = os.environ.get("OH_API_TOKEN")
+if token:
+    headers["Authorization"] = f"Bearer {token}"
+
+request = Request(
+    "http://127.0.0.1:8000/execute_action",
+    data=json.dumps({"action": {"action": "run", "args": {"command": "pwd"}}}).encode(),
+    headers=headers,
+)
+with urlopen(request, timeout=10) as response:
+    result = json.load(response)
+assert result["extras"]["metadata"]["exit_code"] == 0, result
+assert result["content"].strip() == os.environ["WORK_DIR"], result
+PY
+        return
+    fi
+
     log_info "Running tests inside container..."
     
     # 检查测试目录
@@ -202,7 +219,9 @@ show_usage() {
     echo
     echo "Container ports:"
     echo "  API port: ${OH_BIND_HOST:-127.0.0.1}:8000"
-    echo "  VSCode: http://localhost:3000"
+    if [[ "$dockerfile" == Dockerfile.full ]]; then
+        echo "  VS Code: http://localhost:3000"
+    fi
     echo "  Workspace: $(pwd)/workspace"
     echo
     echo "Quick test:"
@@ -217,6 +236,18 @@ show_usage() {
 
 # 主函数
 main() {
+    case "${1:-}" in
+        "") ;;
+        --full)
+            image=simple-openhands:full
+            dockerfile=Dockerfile.full
+            ;;
+        *)
+            log_error "Usage: ./deploy.sh [--full]"
+            exit 2
+            ;;
+    esac
+
     echo "=========================================="
     echo "  Simple OpenHands Runtime - Linux Version"
     echo "=========================================="
@@ -236,8 +267,8 @@ main() {
 
     # 执行各个步骤
     check_docker
-    cleanup
     build_linux_image
+    cleanup
     prepare_mounts
     start_container
     wait_for_service

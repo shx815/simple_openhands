@@ -40,8 +40,13 @@ from simple_openhands.utils.system_stats import get_system_stats
 from simple_openhands.utils.file.file_viewer import generate_file_viewer_html
 from simple_openhands.utils.file.files import line_range
 
-from simple_openhands.plugins import ALL_PLUGINS, JupyterPlugin, VSCodePlugin
 from simple_openhands.events.serialization import event_from_dict, event_to_dict
+
+PLUGINS_ENABLED = os.environ.get("OH_ENABLE_PLUGINS", "1") != "0"
+if PLUGINS_ENABLED:
+    from simple_openhands.plugins import ALL_PLUGINS, JupyterPlugin, VSCodePlugin
+else:
+    ALL_PLUGINS = {}
 
 # 全局变量
 bash_session: Optional[BashSession] = None
@@ -50,7 +55,7 @@ jupyter_init_lock = asyncio.Lock()
 # 已初始化的插件实例注册表
 PLUGIN_INSTANCES: Dict[str, object] = {}
 
-async def _get_jupyter(username: str) -> JupyterPlugin:
+async def _get_jupyter(username: str) -> "JupyterPlugin":
     async with jupyter_init_lock:
         plugin = PLUGIN_INSTANCES.get("jupyter")
         if isinstance(plugin, JupyterPlugin):
@@ -131,7 +136,7 @@ async def lifespan(app: FastAPI):
         bash_session = None
 
     # 自动初始化核心插件（非阻塞地启动 Jupyter 初始化，避免阻塞应用启动）
-    jupyter_startup = asyncio.create_task(_init_jupyter_async(username)) if bash_session else None
+    jupyter_startup = asyncio.create_task(_init_jupyter_async(username)) if bash_session and PLUGINS_ENABLED else None
     try:
         yield
     finally:
@@ -140,7 +145,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(jupyter_startup, return_exceptions=True)
         jupyter = PLUGIN_INSTANCES.pop("jupyter", None)
         try:
-            if isinstance(jupyter, JupyterPlugin):
+            if PLUGINS_ENABLED and isinstance(jupyter, JupyterPlugin):
                 await jupyter.close()
         finally:
             if bash_session:
@@ -325,6 +330,8 @@ async def get_vscode_connection_token():
     
     基于OpenHands的VSCode插件API，提供连接令牌
     """
+    if not PLUGINS_ENABLED:
+        raise HTTPException(status_code=501, detail="VS Code requires the full runtime image.")
     plugin = PLUGIN_INSTANCES.get("vscode")
     if plugin is None or not isinstance(plugin, VSCodePlugin):
         raise HTTPException(
@@ -357,6 +364,8 @@ async def get_vscode_url():
     
     基于OpenHands的VSCode插件API，提供连接URL
     """
+    if not PLUGINS_ENABLED:
+        raise HTTPException(status_code=501, detail="VS Code requires the full runtime image.")
     plugin = PLUGIN_INSTANCES.get("vscode")
     if plugin is None or not isinstance(plugin, VSCodePlugin):
         raise HTTPException(
@@ -441,6 +450,8 @@ async def initialize_plugin(plugin_name: str, username: str = "simple_openhands"
     - AgentSkills插件是函数集合，无需初始化，可直接使用
     - 只有VSCode等需要运行时状态的插件需要手动初始化
     """
+    if not PLUGINS_ENABLED and plugin_name in {"jupyter", "agent_skills", "vscode"}:
+        raise HTTPException(status_code=501, detail=f"Plugin '{plugin_name}' requires the full runtime image.")
     if plugin_name not in ALL_PLUGINS:
         raise HTTPException(status_code=404, detail=f"Plugin '{plugin_name}' not found")
     
@@ -524,7 +535,11 @@ async def execute_action(action_request: ActionRequest):
             return event_to_dict(observation)
             
         elif isinstance(action, IPythonRunCellAction):
-            # 执行 Python 代码 - Jupyter自动可用
+            if not PLUGINS_ENABLED:
+                raise HTTPException(
+                    status_code=501,
+                    detail="Jupyter requires the full runtime image. The shell can run python -c.",
+                )
             try:
                 plugin = await _get_jupyter(os.environ.get('USERNAME', getpass.getuser()))
             except Exception as e:

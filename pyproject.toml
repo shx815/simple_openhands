@@ -11,6 +11,16 @@ dependencies = []
 cli = [
     "requests>=2.32.3",
 ]
+runtime = [
+    "fastapi==0.104.1",
+    "uvicorn==0.24.0",
+    "pydantic>=2.11.3",
+    "bashlex==0.18",
+    "psutil>=5.9.6",
+    "python-json-logger==3.3.0",
+    "termcolor==3.1.0",
+    "libtmux>=0.37,<0.40",
+]
 server = [
     "fastapi==0.104.1",
     "uvicorn[standard]==0.24.0",

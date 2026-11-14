@@ -2,7 +2,7 @@
 
 [Windows 版本说明请点击这里 → README-Windows.md](README-Windows.md)
 
-基于 OpenHands 的轻量容器运行时，供代码 Agent 和自动化脚本通过 HTTP 或 `oh-run` 执行 Bash、运行 Python、读写工作区并获取结果。每个实例维护一个 Bash 会话和一个 Jupyter 内核，多次调用可以共享当前目录和 Python 变量。
+基于 OpenHands 的轻量容器运行时，供代码 Agent 和自动化脚本通过 HTTP 或 `oh-run` 执行 Bash、运行 Python、读写工作区并获取结果。默认镜像提供持久的 Bash 会话。可选的完整版额外提供 Jupyter 内核、浏览器端 VS Code 和 AgentSkills。
 
 ## 快速开始
 
@@ -14,13 +14,27 @@ docker version
 curl -fsS http://127.0.0.1:8000/alive
 ```
 
-部署脚本会替换同名容器、构建镜像、挂载 `workspace/` 并运行测试。健康检查返回 `"bash_session_active": true` 时，Bash 会话可用。
+部署脚本会构建基础镜像 `simple-openhands:latest`，替换同名容器、挂载 `workspace/` 并运行 Shell API 冒烟检查。健康检查返回 `"bash_session_active": true` 时，Bash 会话可用。
 
 ```bash
 curl -fsS http://127.0.0.1:8000/execute_action \
   -H 'Content-Type: application/json' \
   -d '{"action":{"action":"run","args":{"command":"pwd"}}}'
 ```
+
+## 镜像版本
+
+| | 基础版（默认） | 完整版 |
+| --- | --- | --- |
+| 部署 | `./deploy.sh` | `./deploy.sh --full` |
+| 镜像 | `simple-openhands:latest` | `simple-openhands:full` |
+| 共同功能 | Bash、Git、文件读写与预览、系统状态 | 同左 |
+| 可选功能 | 通过 Bash 执行 `python -c` | 有状态的 Jupyter、VS Code、AgentSkills |
+| 本机端口 | API 8000 | API 8000、VS Code 3000 |
+
+两种部署命令使用同一个容器名和宿主机工作区，切换版本时会替换容器，挂载的文件会保留。完整版也可以用 `docker build -f Dockerfile.full -t simple-openhands:full .` 手动构建。
+
+在 Apple Silicon 上实测，基础版 ARM64 镜像本地大小约 **365 MB**，原完整镜像约 **3.30 GB**。
 
 ## 主要功能
 
@@ -30,7 +44,7 @@ curl -fsS http://127.0.0.1:8000/execute_action \
 - 执行 bash 命令
 - 支持交互式操作
 
-#### **2. Python 代码执行引擎**
+#### **2. Python 代码执行引擎（完整版）**
 - Jupyter Kernel Gateway 集成（自动初始化）
 - 基于 Jupyter Kernel 的代码执行环境，支持状态保持
 - 支持文本和PNG图片输出
@@ -44,7 +58,7 @@ curl -fsS http://127.0.0.1:8000/execute_action \
 - 资源使用统计（CPU、内存、磁盘、I/O）
 - 系统健康检查
 
-#### **5. 插件管理系统**
+#### **5. 插件管理系统（完整版）**
 - **Jupyter 插件**：自动初始化，提供 Python 执行环境
 - **AgentSkills 插件**：立即可用，提供文件操作、搜索、PDF/DOCX/LaTeX/PPTX解析等技能
 - **VSCode 插件**：手动初始化，提供VSCode开发环境（基于OpenVSCode服务器）
@@ -130,6 +144,9 @@ oh-run --url http://127.0.0.1:8000 --timeout 300 --thought '安装依赖' 'pip i
 `oh-run` 会传递远程 Shell 的退出码。`--raw` 也保留退出码，并输出完整 JSON。CLI 的 `--timeout` 控制客户端等待时间。要设置服务端执行超时，请在 API 请求里传 `args.timeout`。
 
 **Python 代码执行**
+
+基础版可运行 `oh-run 'python -c "print(123)"'`。使用 `oh-run --python` 执行有状态的单元格需要完整版。
+
 ```bash
 # 执行 Python 代码（使用 --python 参数）
 oh-run --python 'print("Hello, World!")' 
@@ -174,13 +191,13 @@ oh-run 'pwd'
 docker build -t simple-openhands .
 mkdir -p workspace
 docker run -d --name simple-openhands \
-  -p 127.0.0.1:8000:8000 -p 127.0.0.1:3000:3000 \
+  -p 127.0.0.1:8000:8000 \
   -v "$(pwd)/workspace:/simple_openhands/workspace" \
   simple-openhands
 docker logs -f simple-openhands
 ```
 
-API 和 VS Code 分别绑定本机的 8000 和 3000 端口。Jupyter Gateway 在容器内监听，Python 请求通过主 API 发送。可为 `docker run` 加上 `-e LOG_TO_FILE=true`，将日志写入容器的 `/simple_openhands/code/logs/`。
+基础版只发布本机 API 端口 8000。手动运行完整版时改用 `simple-openhands:full`，并添加 `-p 127.0.0.1:3000:3000`。Jupyter Gateway 在容器内监听，Jupyter 请求通过主 API 发送。可为 `docker run` 加上 `-e LOG_TO_FILE=true`，将日志写入容器的 `/simple_openhands/code/logs/`。
 
 需要远程访问时，为部署脚本设置 `OH_BIND_HOST` 和 `OH_API_TOKEN`。手动部署时，也请同时指定 API 的绑定地址和 `-e OH_API_TOKEN`。使用 HTTPS 代理或可信隧道传输令牌。HTTP 调用方发送 `Authorization: Bearer <token>`，`/alive` 可供探针直接访问。`oh-run` 从环境变量 `OH_API_TOKEN` 读取令牌，并要求通过 `--url` 或 `OH_API_URL` 指定地址。
 
@@ -326,7 +343,9 @@ curl -X POST "http://127.0.0.1:8000/execute_action" \
   }'
 ```
 
-**2. Python 代码执行**
+**2. Python 代码执行（完整版）**
+
+基础版收到 `run_ipython` 请求会返回 HTTP 501。
 
 同一内核逐条执行请求。每条 Python 请求默认最多执行 120 秒，可以通过 `args.timeout` 指定秒数。超时后运行时会尝试中断当前单元格。
 
@@ -476,12 +495,15 @@ curl "http://127.0.0.1:8000/view-file?path=/path/to/your/document.pdf"
 #### 插件管理 API
 
 **插件状态**
+
+基础版的 `available_plugins` 为空。
+
 ```bash
 # 获取所有插件状态
 curl http://127.0.0.1:8000/plugins
 ```
 
-**VS Code 插件**
+**VS Code 插件（完整版）**
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8000/plugins/vscode/initialize
@@ -708,11 +730,13 @@ Execution rules:
 
 ### 环境配置
 
-**容器内环境说明：**
+基础版使用 `python:3.12-slim-bookworm`，并从 `pyproject.toml` 安装 `runtime` 依赖。容器内直接使用 `python`。
+
+**完整版容器环境**
 - **micromamba** 提供 Python 3.12 环境，**Poetry** 创建虚拟环境，镜像构建时通过 **uv** 安装依赖
 - 容器内Python命令需要：`/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run python -c "your_code_here"`
 
-**容器内目录结构：**
+**完整版目录结构**
 ```
 /simple_openhands/
 ├── code/                   # 应用代码
@@ -786,7 +810,7 @@ Event (基础事件类)
 - 完善的错误处理机制，包括命令解析错误、执行错误、超时错误等异常情况
 - 提供详细的错误信息和状态反馈
 
-#### **2. Python 代码执行引擎**
+#### **2. Python 代码执行引擎（完整版）**
 
 **Jupyter Kernel Gateway 集成**
 - 通过 Jupyter Kernel Gateway 执行 Python 代码，基于 Jupyter Kernel 的代码执行环境，支持状态保持
@@ -875,7 +899,10 @@ Event (基础事件类)
 
 冒烟测试需要运行中的 API，默认连接容器内的 `http://127.0.0.1:8000`。测试其他实例时，通过 `OH_TEST_API_URL` 指定地址。给容器设置 `OH_API_TOKEN` 后，测试也会检查缺失或错误令牌返回 HTTP 401。请求失败或结果不符会使测试失败。
 
-#### 在容器内运行
+#### 在完整版容器内运行
+
+基础版部署自带 Shell API 冒烟检查。运行完整 pytest 套件需要用 `./deploy.sh --full` 部署。
+
 ```bash
 # 进入容器
 docker exec -it simple-openhands bash
@@ -897,7 +924,7 @@ cd /simple_openhands/code
 1. **修改代码**
 2. **停止旧容器**: `docker stop simple-openhands && docker rm simple-openhands`
 3. **构建镜像**: `docker build -t simple-openhands .`
-4. **启动新容器**: `docker run -d --name simple-openhands -p 127.0.0.1:8000:8000 -p 127.0.0.1:3000:3000 -v "$(pwd)/workspace:/simple_openhands/workspace" -e WORK_DIR=/simple_openhands/workspace simple-openhands`
+4. **启动新容器**: `docker run -d --name simple-openhands -p 127.0.0.1:8000:8000 -v "$(pwd)/workspace:/simple_openhands/workspace" -e WORK_DIR=/simple_openhands/workspace simple-openhands`
 5. **验证修改**: 测试新功能是否正常工作
 
 ### 开发提示
