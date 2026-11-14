@@ -8,15 +8,17 @@ import os
 import sys
 import asyncio
 import getpass
+import shlex
 import subprocess
 import traceback
 import time
 from contextlib import asynccontextmanager
+from secrets import compare_digest
 from typing import Optional, Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 import uvicorn
 
 from simple_openhands.models import ServerInfo
@@ -33,28 +35,40 @@ if sys.platform == 'win32':
 else:
     from simple_openhands.bash import BashSession
 from simple_openhands.events.action import CmdRunAction, FileReadAction, FileWriteAction, FileEditAction, IPythonRunCellAction
-from simple_openhands.events.observation import CmdOutputObservation, FileReadObservation, FileWriteObservation, FileEditObservation, IPythonRunCellObservation
+from simple_openhands.events.observation import ErrorObservation, FileReadObservation, FileWriteObservation, FileEditObservation, IPythonRunCellObservation
 from simple_openhands.utils.system_stats import get_system_stats
 from simple_openhands.utils.file.file_viewer import generate_file_viewer_html
+from simple_openhands.utils.file.files import line_range
 
 from simple_openhands.plugins import ALL_PLUGINS, JupyterPlugin, VSCodePlugin
 from simple_openhands.events.serialization import event_from_dict, event_to_dict
 
 # 全局变量
 bash_session: Optional[BashSession] = None
+bash_lock = asyncio.Lock()
+jupyter_init_lock = asyncio.Lock()
 # 已初始化的插件实例注册表
 PLUGIN_INSTANCES: Dict[str, object] = {}
 
-async def _init_jupyter_async(username: str, timeout_seconds: float = 60.0) -> None:
-    """Initialize Jupyter plugin in background with timeout, without blocking app start."""
+async def _get_jupyter(username: str) -> JupyterPlugin:
+    async with jupyter_init_lock:
+        plugin = PLUGIN_INSTANCES.get("jupyter")
+        if isinstance(plugin, JupyterPlugin):
+            return plugin
+
+        plugin = JupyterPlugin()
+        try:
+            await asyncio.wait_for(plugin.initialize(username), timeout=60)
+        except (Exception, asyncio.CancelledError):
+            await plugin.close()
+            raise
+        PLUGIN_INSTANCES["jupyter"] = plugin
+        return plugin
+
+
+async def _init_jupyter_async(username: str) -> None:
     try:
-        print(f"Starting Jupyter plugin async initialization (timeout {timeout_seconds}s)...")
-        jupyter_plugin = JupyterPlugin()
-        await asyncio.wait_for(jupyter_plugin.initialize(username), timeout=timeout_seconds)
-        PLUGIN_INSTANCES["jupyter"] = jupyter_plugin
-        print("Jupyter plugin auto-initialized successfully (async)")
-    except asyncio.TimeoutError:
-        print("Warning: Jupyter plugin initialization timed out; will initialize lazily on first use")
+        await _get_jupyter(username)
     except Exception as e:
         print(f"Warning: Jupyter plugin async initialization failed: {e}")
 
@@ -62,7 +76,9 @@ async def _init_jupyter_async(username: str, timeout_seconds: float = 60.0) -> N
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理 - 使用OpenHands的分散式平台检测模式"""
-    global bash_session
+    global bash_session, bash_lock, jupyter_init_lock
+    bash_lock = asyncio.Lock()
+    jupyter_init_lock = asyncio.Lock()
 
     # 检查是否有可用的bash实现
     if BashSession is None:
@@ -94,7 +110,8 @@ async def lifespan(app: FastAPI):
         print(f"Bash session initialized in {work_dir} as user {username}")
         # 强制将会话目录切换到工作目录，避免不一致
         try:
-            bash_session.execute(CmdRunAction(command=f'cd {work_dir}', cwd=work_dir, is_static=True, hidden=True))
+            shell_path = shlex.quote(work_dir) if sys.platform != 'win32' else f'"{work_dir}"'
+            bash_session.execute(CmdRunAction(command=f'cd {shell_path}', cwd=work_dir, is_static=True, hidden=True))
         except Exception:
             pass
         # 自动初始化Git仓库并设置safe.directory，避免“dubious ownership”问题
@@ -114,21 +131,21 @@ async def lifespan(app: FastAPI):
         bash_session = None
 
     # 自动初始化核心插件（非阻塞地启动 Jupyter 初始化，避免阻塞应用启动）
-    if bash_session:
+    jupyter_startup = asyncio.create_task(_init_jupyter_async(username)) if bash_session else None
+    try:
+        yield
+    finally:
+        if jupyter_startup:
+            jupyter_startup.cancel()
+            await asyncio.gather(jupyter_startup, return_exceptions=True)
+        jupyter = PLUGIN_INSTANCES.pop("jupyter", None)
         try:
-            # kick off async Jupyter init with timeout; server can serve /alive before it completes
-            asyncio.create_task(_init_jupyter_async(username))
-        except Exception as e:
-            print(f"Failed to schedule Jupyter initialization: {e}")
-
-        # AgentSkills插件无需初始化，函数立即可用
-        print("AgentSkills plugin functions are always available (no initialization needed)")
-
-    yield
-
-    # 关闭时清理
-    if bash_session:
-        bash_session.close()
+            if isinstance(jupyter, JupyterPlugin):
+                await jupyter.close()
+        finally:
+            if bash_session:
+                await run_in_threadpool(bash_session.close)
+                bash_session = None
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -138,14 +155,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 添加CORS中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.middleware("http")
+async def authenticate(request: Request, call_next):
+    token = os.environ.get("OH_API_TOKEN")
+    if token and request.url.path != "/alive":
+        expected = f"Bearer {token}".encode("utf-8")
+        actual = request.headers.get("Authorization", "").encode("utf-8")
+        if not compare_digest(actual, expected):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "A valid bearer token is required"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return await call_next(request)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -178,7 +200,7 @@ async def alive_check():
     return {"status": "alive", "bash_session_active": bash_active}
 
 @app.get("/server_info", response_model=ServerInfo)
-async def get_server_info():
+def get_server_info():
     """获取服务器信息"""
     # 根据平台设置默认工作目录
     if sys.platform == 'win32':
@@ -211,7 +233,7 @@ async def get_server_info():
 
 
 @app.get("/system/stats")
-async def get_system_stats_api():
+def get_system_stats_api():
     """获取系统统计信息
     
     基于你已有的get_system_stats函数，提供专业的系统统计API
@@ -234,10 +256,12 @@ async def get_system_stats_api():
 @app.post("/reset")
 async def reset_session():
     """重置bash session"""
-    global bash_session
+    async with bash_lock:
+        return await run_in_threadpool(_reset_session)
 
-    if bash_session:
-        bash_session.close()
+
+def _reset_session():
+    global bash_session
 
     # 根据平台设置工作目录
     if sys.platform == 'win32':
@@ -248,14 +272,18 @@ async def reset_session():
     username = os.environ.get('USERNAME', getpass.getuser())
 
     try:
-        bash_session = BashSession(
+        if bash_session:
+            previous_session, bash_session = bash_session, None
+            previous_session.close()
+        new_session = BashSession(
             work_dir=work_dir, 
             username=username,
             no_change_timeout_seconds=120  # 增加到120秒，支持长时间运行的编译命令
         )
         # Windows PowerShell不需要initialize，Linux bash需要
-        if hasattr(bash_session, 'initialize'):
-            bash_session.initialize()
+        if hasattr(new_session, 'initialize'):
+            new_session.initialize()
+        bash_session = new_session
         return {"message": "Bash session reset successfully"}
     except Exception as e:
         bash_session = None
@@ -481,29 +509,26 @@ async def execute_action(action_request: ActionRequest):
 
     try:
         # 从字典创建 Action 对象 - 直接传递 action_request.action
-        action = event_from_dict(action_request.action)
+        try:
+            action = event_from_dict(action_request.action)
+        except (TypeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         
         # 根据 Action 类型执行相应的操作
         if isinstance(action, CmdRunAction):
             # 执行 bash 命令
-            observation = bash_session.execute(action)
+            async with bash_lock:
+                if bash_session is None:
+                    raise HTTPException(status_code=503, detail="Bash session not available")
+                observation = await run_in_threadpool(bash_session.execute, action)
             return event_to_dict(observation)
             
         elif isinstance(action, IPythonRunCellAction):
             # 执行 Python 代码 - Jupyter自动可用
-            plugin = PLUGIN_INSTANCES.get("jupyter")
-            if plugin is None or not isinstance(plugin, JupyterPlugin):
-                # 如果Jupyter未初始化，自动初始化
-                try:
-                    print("Auto-initializing Jupyter plugin...")
-                    jupyter_plugin = JupyterPlugin()
-                    await jupyter_plugin.initialize("simple_openhands")
-                    PLUGIN_INSTANCES["jupyter"] = jupyter_plugin
-                    plugin = jupyter_plugin
-                    print("Jupyter plugin auto-initialized successfully")
-                except Exception as e:
-                    print(f"Failed to auto-initialize Jupyter plugin: {e}")
-                    raise HTTPException(status_code=500, detail=f"Failed to auto-initialize Jupyter: {str(e)}")
+            try:
+                plugin = await _get_jupyter(os.environ.get('USERNAME', getpass.getuser()))
+            except Exception as e:
+                raise HTTPException(status_code=503, detail=f"Failed to initialize Jupyter: {e}") from e
             
             try:
                 observation = await plugin.run(action)
@@ -520,22 +545,27 @@ async def execute_action(action_request: ActionRequest):
             
         elif isinstance(action, FileReadAction):
             # 读取文件
-            observation = await read_file_action(action)
+            async with bash_lock:
+                observation = await read_file_action(action)
             return event_to_dict(observation)
             
         elif isinstance(action, FileWriteAction):
             # 写入文件
-            observation = await write_file_action(action)
+            async with bash_lock:
+                observation = await write_file_action(action)
             return event_to_dict(observation)
             
         elif isinstance(action, FileEditAction):
             # 编辑文件
-            observation = await edit_file_action(action)
+            async with bash_lock:
+                observation = await edit_file_action(action)
             return event_to_dict(observation)
             
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported action type: {type(action).__name__}")
             
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -567,8 +597,9 @@ async def read_file_action(action: FileReadAction) -> FileReadObservation:
             )
         
         # 读取文件内容
-        with open(filepath, 'r', encoding='utf-8') as file:
-            content = file.read()
+        span = line_range(action.start, action.end)
+        with open(filepath, 'r', encoding='utf-8', newline='') as file:
+            content = file.read() if span == slice(0, None) else ''.join(file.readlines()[span])
             
         return FileReadObservation(
             content=content,
@@ -590,12 +621,20 @@ async def write_file_action(action: FileWriteAction) -> FileWriteObservation:
     filepath = action.path if os.path.isabs(action.path) else os.path.join(working_dir, action.path)
     
     try:
+        span = line_range(action.start, action.end)
+        content = action.content
+        if span != slice(0, None) and os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8', newline='') as file:
+                lines = file.readlines()
+            lines[span] = [content]
+            content = ''.join(lines)
+
         # 确保目录存在
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         # 写入文件
-        with open(filepath, 'w', encoding='utf-8') as file:
-            file.write(action.content)
+        with open(filepath, 'w', encoding='utf-8', newline='') as file:
+            file.write(content)
             
         return FileWriteObservation(
             content="File written successfully",
@@ -608,7 +647,7 @@ async def write_file_action(action: FileWriteAction) -> FileWriteObservation:
             path=filepath
         )
 
-async def edit_file_action(action: FileEditAction) -> FileEditObservation:
+async def edit_file_action(action: FileEditAction) -> FileEditObservation | ErrorObservation:
     """编辑文件内容"""
     if not bash_session:
         raise HTTPException(status_code=503, detail="Bash session not available")
@@ -618,37 +657,37 @@ async def edit_file_action(action: FileEditAction) -> FileEditObservation:
     
     try:
         if not os.path.exists(filepath):
-            return FileEditObservation(
-                content=f"File not found: {filepath}",
-                path=filepath
-            )
+            return ErrorObservation(content=f"File not found: {filepath}")
+
+        if action.command != "str_replace":
+            return ErrorObservation(content=f"Unsupported file edit command: {action.command}")
+        if not action.old_str or action.new_str is None:
+            return ErrorObservation(content="str_replace requires nonempty old_str and a new_str")
         
         # 读取原文件内容
-        with open(filepath, 'r', encoding='utf-8') as file:
+        with open(filepath, 'r', encoding='utf-8', newline='') as file:
             old_content = file.read()
         
         # 执行编辑操作
-        if action.command == "str_replace" and action.old_str and action.new_str:
-            new_content = old_content.replace(action.old_str, action.new_str)
-        else:
-            new_content = old_content
+        if action.old_str not in old_content:
+            return ErrorObservation(content=f"old_str was not found in {filepath}")
+        new_content = old_content.replace(action.old_str, action.new_str)
         
         # 写入新内容
-        with open(filepath, 'w', encoding='utf-8') as file:
-            file.write(new_content)
+        if new_content != old_content:
+            with open(filepath, 'w', encoding='utf-8', newline='') as file:
+                file.write(new_content)
             
         return FileEditObservation(
             content="File edited successfully",
             path=filepath,
+            prev_exist=True,
             old_content=action.old_str,
             new_content=action.new_str
         )
         
     except Exception as e:
-        return FileEditObservation(
-            content=f"Error editing file {filepath}: {str(e)}",
-            path=filepath
-        )
+        return ErrorObservation(content=f"Error editing file {filepath}: {e}")
 
 def main():
     """主函数"""

@@ -2,7 +2,25 @@
 
 [Windows 版本说明请点击这里 → README-Windows.md](README-Windows.md)
 
-基于 OpenHands 的 runtime 代码创建的 Docker 容器，提供 FastAPI 接口来执行 Bash 命令与插件功能。
+基于 OpenHands 的轻量容器运行时，供代码 Agent 和自动化脚本通过 HTTP 或 `oh-run` 执行 Bash、运行 Python、读写工作区并获取结果。每个实例维护一个 Bash 会话和一个 Jupyter 内核，多次调用可以共享当前目录和 Python 变量。
+
+## 快速开始
+
+在 macOS 上先打开 Docker Desktop，在 Linux 上先启动 Docker。进入仓库根目录，确认 Docker 可用并启动 Linux 容器。
+
+```bash
+docker version
+./deploy.sh
+curl -fsS http://127.0.0.1:8000/alive
+```
+
+部署脚本会替换同名容器、构建镜像、挂载 `workspace/` 并运行测试。健康检查返回 `"bash_session_active": true` 时，Bash 会话可用。
+
+```bash
+curl -fsS http://127.0.0.1:8000/execute_action \
+  -H 'Content-Type: application/json' \
+  -d '{"action":{"action":"run","args":{"command":"pwd"}}}'
+```
 
 ## 主要功能
 
@@ -41,7 +59,7 @@
 **对比示例：**
 ```bash
 # 不用 oh-run：需要写冗长的 curl 命令
-curl -X POST "http://localhost:8000/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{"action":{"action":"run","args":{"command":"pwd"}}}'
 
@@ -70,9 +88,9 @@ micromamba activate oh-run
 
 ```bash
 # 通过环境变量（推荐）
-export OH_API_URL=http://127.0.0.1:8002
+export OH_API_URL=http://127.0.0.1:8000
 # 或者使用命令行参数 
-oh-run --url http://127.0.0.1:8002 'pwd'
+oh-run --url http://127.0.0.1:8000 'pwd'
 ```
 
 #### 使用示例
@@ -90,7 +108,7 @@ oh-run 'whoami'
 # 添加思考注释（方便调试）
 oh-run --thought '列出项目文件' 'ls -la'
 
-# 设置超时时间（秒）
+# 设置客户端等待 HTTP 响应的时间（秒）
 oh-run --timeout 120 'find / -name "*.log"'
 
 # 阻塞命令
@@ -100,21 +118,23 @@ oh-run --blocking 'sleep 10'
 oh-run --raw 'uname -a'
 
 # 指定 API URL
-oh-run --url http://127.0.0.1:8002 'pwd'
+oh-run --url http://127.0.0.1:8000 'pwd'
 
 # 检查服务器上下文
 oh-run --context
 
 # 组合使用
-oh-run --url http://127.0.0.1:8002 --timeout 300 --thought '安装依赖' 'pip install requests'
+oh-run --url http://127.0.0.1:8000 --timeout 300 --thought '安装依赖' 'pip install requests'
 ```
 
-**Python 代码执行：**
+`oh-run` 会传递远程 Shell 的退出码。`--raw` 也保留退出码，并输出完整 JSON。CLI 的 `--timeout` 控制客户端等待时间。要设置服务端执行超时，请在 API 请求里传 `args.timeout`。
+
+**Python 代码执行**
 ```bash
 # 执行 Python 代码（使用 --python 参数）
 oh-run --python 'print("Hello, World!")' 
 
-# 执行多行 Python 代码
+# 在同一次请求中执行多条 Python 语句
 oh-run --python 'import os; print(os.getcwd())'
 
 # 带思考注释
@@ -126,11 +146,11 @@ oh-run --python 'import json; data = {"name": "test", "value": 123}; print(json.
 
 **并行任务场景：**
 
-如果你有多个运行时实例（如多个容器），可以为每个终端/会话设置不同的环境变量：
+需要互相独立的会话时，为各任务启动独立容器，分别映射端口并挂载工作区。下例假设两个实例已分别监听 8000 和 9002。
 
 ```bash
 # 终端 1 - 连接到运行时 A
-export OH_API_URL=http://127.0.0.1:8002
+export OH_API_URL=http://127.0.0.1:8000
 oh-run 'pwd'
 
 # 终端 2 - 连接到运行时 B
@@ -142,51 +162,27 @@ oh-run 'pwd'
 
 ### 1. 环境部署
 
-#### 方式一：一键部署脚本（推荐）
+#### 一键部署
+
+见上面的[快速开始](#快速开始)。
+
+#### 手动部署
+
+在仓库根目录运行以下命令。
+
 ```bash
-# 进入项目目录
-cd simple_openhands
-
-# 给脚本执行权限
-chmod +x deploy.sh
-
-# 运行部署脚本,启动容器时默认使用8000、3000、8001三个端口
-./deploy.sh 
-```
-
-#### 方式二：手动部署
-```bash
-# 进入项目目录
-cd simple_openhands
-
-# 构建 Docker 镜像
 docker build -t simple-openhands .
-
-# 启动容器
+mkdir -p workspace
 docker run -d --name simple-openhands \
-  -p 8002:8000 -p 3001:3000 -p 8001:8001 \
+  -p 127.0.0.1:8000:8000 -p 127.0.0.1:3000:3000 \
   -v "$(pwd)/workspace:/simple_openhands/workspace" \
-  -e WORK_DIR=/simple_openhands/workspace \
   simple-openhands
-
-# 挂载目录可自定义
-# 启用文件日志（可选）
-# 添加 -e LOG_TO_FILE=true 环境变量，日志会写入到 /simple_openhands/code/logs/simple_openhands_YYYY-MM-DD.log
-docker run -d --name simple-openhands \
-  -p 8002:8000 -p 3001:3000 -p 8001:8001 \
-  -v "$(pwd)/workspace:/simple_openhands/workspace" \
-  -e WORK_DIR=/simple_openhands/workspace \
-  -e LOG_TO_FILE=true \
-  simple-openhands
-
-# 端口说明：
-# -p 8002:8000          # 主API服务端口，提供所有API接口
-# -p 3001:3000          # VSCode服务器端口，用于Web版VSCode访问
-# -p 8001:8001          # Jupyter端口，用于Python代码执行
-
-# 查看启动日志
 docker logs -f simple-openhands
 ```
+
+API 和 VS Code 分别绑定本机的 8000 和 3000 端口。Jupyter Gateway 在容器内监听，Python 请求通过主 API 发送。可为 `docker run` 加上 `-e LOG_TO_FILE=true`，将日志写入容器的 `/simple_openhands/code/logs/`。
+
+需要远程访问时，为部署脚本设置 `OH_BIND_HOST` 和 `OH_API_TOKEN`。手动部署时，也请同时指定 API 的绑定地址和 `-e OH_API_TOKEN`。使用 HTTPS 代理或可信隧道传输令牌。HTTP 调用方发送 `Authorization: Bearer <token>`，`/alive` 可供探针直接访问。`oh-run` 从环境变量 `OH_API_TOKEN` 读取令牌，并要求通过 `--url` 或 `OH_API_URL` 指定地址。
 
 ### 2. API 接口使用
 
@@ -195,96 +191,64 @@ docker logs -f simple-openhands
 **健康检查**
 ```bash
 # 检查服务是否存活
-curl http://localhost:8002/alive
+curl http://127.0.0.1:8000/alive
 
 # 获取服务器详细信息
-curl http://localhost:8002/server_info
+curl http://127.0.0.1:8000/server_info
 # 或者使用oh-run
 oh-run --context
 
 # 访问根路径
-curl http://localhost:8002/
+curl http://127.0.0.1:8000/
 ```
 
 **系统监控**
 ```bash
 # 获取系统资源统计
-curl http://localhost:8002/system/stats
+curl http://127.0.0.1:8000/system/stats
 
 # 重置 bash session
-curl -X POST "http://localhost:8002/reset"
+curl -X POST "http://127.0.0.1:8000/reset"
 ```
 
 #### execute_action 统一接口
 
-**标准命令格式**
-
-所有操作都通过 `/execute_action` 端点执行，使用统一的JSON格式。以下是完整的命令结构说明：
+请求体中的 `action.action` 是操作类型，`action.args` 是该操作的参数。
 
 ```json
 {
   "action": {
-    "action": "action_type",          // 动作类型：run(命令执行)、run_ipython(Python代码)、read(文件读取)、write(文件写入)、edit(文件编辑)
-    "args": {                         // 动作参数，根据动作类型不同而不同
-      "command": "pwd",               // 命令执行：要执行的bash命令
-      "code": "print('Hello')",       // Python执行：要执行的Python代码
-      "path": "/path/to/file",        // 文件操作：文件路径
-      "content": "file content",      // 文件写入/编辑：文件内容
-      "thought": "执行原因说明",       // 可选：执行此动作的思考过程
-      "start": 1,                     // 文件编辑：起始行号(1-indexed)
-      "end": -1,                      // 文件编辑：结束行号(-1表示文件末尾)
-      "command": "str_replace",       // 文件编辑：编辑命令(str_replace, insert等)
-      "old_str": "old text",          // 文件编辑：要替换的旧字符串
-      "new_str": "new text"           // 文件编辑：新的字符串
+    "action": "run",
+    "args": {
+      "command": "pwd",
+      "timeout": 15
     }
   }
 }
 ```
 
-**标准响应格式 (Observation)：**
-
-系统支持多种响应类型，所有响应都使用统一的JSON结构，与action格式保持一致：
+正常的执行结果包含顶层 `observation` 和 `content`。Shell 退出码位于 `extras.metadata.exit_code`，Python 返回的 PNG 图片位于 `extras.image_urls`。
 
 ```json
 {
-  "observation": "observation_type",  // 响应类型：run(命令执行)、run_ipython(Python代码)、read(文件读取)、write(文件写入)、edit(文件编辑)
-  "args": {                           // 统一参数结构，包含所有相关字段
-    "content": "响应内容",             // 响应的主要内容（命令输出、文件内容、操作结果等）
-    "command": "执行的命令",           // 命令执行：实际执行的bash命令
-    "hidden": false,                  // 命令执行：是否隐藏输出
-    "metadata": {                     // 命令执行：命令执行元数据
-      "exit_code": 0,                 // 命令退出码（0表示成功）
-      "pid": -1,                      // 进程ID
-      "username": "用户名",            // 执行命令的用户名
-      "hostname": "主机名",            // 主机名
-      "working_dir": "工作目录",       // 命令执行时的工作目录
-      "py_interpreter_path": "Python解释器路径", // Python解释器路径
-      "prefix": "",                   // 输出前缀
-      "suffix": "\n[Command completed with exit code 0.]" // 输出后缀
-    },
-    "code": "执行的Python代码",       // Python执行：要执行的Python代码
-    "image_urls": ["图片URL1", "图片URL2"], // Python执行：生成的图片URL列表（如matplotlib图表）
-    "path": "文件路径",                // 文件操作：文件路径
-    "old_content": "旧内容",           // 文件编辑：编辑前的旧内容
-    "new_content": "新内容",           // 文件编辑：编辑后的新内容
-    "prev_exist": false,              // 文件编辑：文件之前是否存在
-    "impl_source": "DEFAULT",         // 文件操作：实现来源
-    "diff": "diff内容",               // 文件编辑：差异内容
-    "error_id": "错误ID"              // 错误响应：错误标识符
+  "observation": "run",
+  "content": "/simple_openhands/workspace",
+  "extras": {
+    "command": "pwd",
+    "metadata": {
+      "exit_code": 0,
+      "working_dir": "/simple_openhands/workspace"
+    }
   }
 }
 ```
 
-**说明：**
-- 所有observation响应都使用统一的`args`结构
-- 根据不同的observation类型，`args`中会包含相应的字段
-- 字段含义与具体操作类型相关，未使用的字段不会出现在响应中
-- 这种统一格式便于客户端处理，与action的格式保持一致
+命令执行失败仍可能返回 HTTP 200。调用方应检查 Shell 退出码，并处理 `observation: "error"`。
 
 **1. Bash 命令执行**
 ```bash
 # 输出Hello World
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -297,7 +261,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
   
 # 列出当前目录下的内容
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -310,7 +274,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
 
 # 显示当前工作目录路径
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -323,7 +287,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
 
 # 切换到指定目录
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -336,7 +300,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
 
 # 显示当前登录的用户名
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -349,7 +313,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
 
 # 查找指定类型的文件
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -363,33 +327,37 @@ curl -X POST "http://localhost:8002/execute_action" \
 ```
 
 **2. Python 代码执行**
+
+同一内核逐条执行请求。每条 Python 请求默认最多执行 120 秒，可以通过 `args.timeout` 指定秒数。超时后运行时会尝试中断当前单元格。
+
 ```bash
 # 执行简单Python代码
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
       "action": "run_ipython",
       "args": {
-        "code": "print(\"Hello, World!\")"
+        "code": "print(\"Hello, World!\")",
+        "timeout": 15
       }
     }
   }'
 
 # 查看系统信息
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
       "action": "run_ipython",
       "args": {
-        "code": "import os\nprint(f\"Current directory: {os.getcwd()}\")\nprint(f\"Files: {os.listdir(\".\")}\")"
+        "code": "import os\nprint(f\"Current directory: {os.getcwd()}\")\nprint(\"Files:\", os.listdir(\".\"))"
       }
     }
   }'
 
 # 数据处理示例
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -401,7 +369,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
 
 # 网络请求示例
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -412,8 +380,8 @@ curl -X POST "http://localhost:8002/execute_action" \
     }
   }'
 
-# 生成图表示例
-curl -X POST "http://localhost:8002/execute_action" \
+# 生成图表示例（先在容器的 Python 环境中安装 matplotlib）
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -426,9 +394,12 @@ curl -X POST "http://localhost:8002/execute_action" \
 ```
 
 **3. 文件操作（read/write/edit）**
+
+按行读写使用从 0 开始的行号。范围包含 `start`，截至 `end` 之前。`end=-1` 表示文件末尾。默认的 `start=0, end=-1` 适用于整个文件。局部写入保留范围外的内容，按原样写入 `content`，包括换行符。`str_replace` 可以用空字符串删除匹配内容，找不到目标时返回 `error` observation。
+
 ```bash
 # 写入文件（write）
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -442,7 +413,7 @@ curl -X POST "http://localhost:8002/execute_action" \
   }'
 
 # 编辑文件（edit）
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -457,21 +428,23 @@ curl -X POST "http://localhost:8002/execute_action" \
     }
   }'
 
-# 读取文件（read）
-curl -X POST "http://localhost:8002/execute_action" \
+# 读取第一行（read）
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
       "action": "read",
       "args": {
         "path": "/simple_openhands/workspace/test.txt",
+        "start": 0,
+        "end": 1,
         "thought": "查看文件内容"
       }
     }
   }'
 
 # 删除文件
-curl -X POST "http://localhost:8002/execute_action" \
+curl -X POST "http://127.0.0.1:8000/execute_action" \
   -H "Content-Type: application/json" \
   -d '{
     "action": {
@@ -491,10 +464,10 @@ curl -X POST "http://localhost:8002/execute_action" \
 除了execute_action统一接口外，还提供专门的文件查看端点：
 ```bash
 # 查看图片文件（PNG、JPG、GIF）
-curl "http://localhost:8002/view-file?path=/path/to/your/image.png"
+curl "http://127.0.0.1:8000/view-file?path=/path/to/your/image.png"
 
 # 查看PDF文件
-curl "http://localhost:8002/view-file?path=/path/to/your/document.pdf"
+curl "http://127.0.0.1:8000/view-file?path=/path/to/your/document.pdf"
 
 # 注意：/view-file 只支持图片和PDF文件，不支持文本文件
 # 文本文件请使用上面的 execute_action——read 文件操作
@@ -505,28 +478,17 @@ curl "http://localhost:8002/view-file?path=/path/to/your/document.pdf"
 **插件状态**
 ```bash
 # 获取所有插件状态
-curl http://localhost:8002/plugins
+curl http://127.0.0.1:8000/plugins
 ```
 
-**VSCode 插件**
+**VS Code 插件**
+
 ```bash
-# 给挂载目录权限
-chmod 777 workspace
-
-# 初始化 VSCode 插件
-curl -X POST "http://localhost:8002/plugins/vscode/initialize" \
-  -H "Content-Type: application/json" \
-  -d '{"username": "simple_openhands"}'
-
-# 获取 VSCode 连接URL
-curl http://localhost:8002/vscode-url
-
-# 获取 VSCode 连接令牌
-curl http://localhost:8002/vscode/connection_token
-
-# 使用ip访问示例：（实际请更换ip,port,token）
-http://10.1.2.2:3001/?tkn=9abae0ba-2de0-4c9d-8dcb-11fdf98f74ff&folder=/simple_openhands/workspace"
+curl -fsS -X POST http://127.0.0.1:8000/plugins/vscode/initialize
+curl -fsS http://127.0.0.1:8000/vscode-url
 ```
+
+在同一台电脑的浏览器中打开返回的 `vscode_url`。如果手动修改了宿主机上的 VS Code 映射端口，把 URL 中的端口替换为映射后的端口。
 
 **注意**：
 - Jupyter 插件：服务启动时自动初始化，无需手动操作
@@ -690,7 +652,7 @@ if __name__ == "__main__":
    - 检查退出码（0 表示成功）
 
 4. **输出格式**：
-   - `oh-run` 的输出格式为：`Command ran and generated the following output:\n```\n{content}\n````
+   - `oh-run` 默认打印响应的 `content`，通过 `--raw` 查看完整 JSON
    - 空输出会显示为 `[empty output]`
 
 
@@ -708,13 +670,13 @@ Execute a bash command in the terminal within a persistent shell session.
 ### Command Execution
 * One command at a time: You can only execute one bash command at a time. If you need to run multiple commands sequentially, use `&&` or `;` to chain them together.
 * Persistent session: Commands execute in a persistent shell session where environment variables, virtual environments, and working directory persist between commands.
-* Soft timeout: Commands have a soft timeout of 10 seconds, once that's reached, you have the option to continue or interrupt the command (see section below for details)
+* Inactivity timeout: By default, the API returns control after 120 seconds without new output from a non-blocking command. The process can still be running.
 * Shell options: Do NOT use `set -e`, `set -eu`, or `set -euo pipefail` in shell scripts or commands in this environment. The runtime may not support them and can cause unusable shell sessions. If you want to run multi-line bash commands, write the commands to a file and then run it, instead.
 
 ### Long-running Commands
 * For commands that may run indefinitely, run them in the background and redirect output to a file, e.g. `python3 app.py > server.log 2>&1 &`.
-* For commands that may run for a long time (e.g. installation or testing commands), or commands that run for a fixed amount of time (e.g. sleep), you should set the "timeout" parameter of your function call to an appropriate value.
-* If a bash command returns exit code `-1`, this means the process hit the soft timeout and is not yet finished. By setting `is_input` to `true`, you can:
+* For commands that may run for a long time (e.g. installation or testing commands), or commands that run for a fixed amount of time (e.g. sleep), you should set the API action argument `args.timeout` in seconds to limit how long the server waits for output.
+* If a bash command returns exit code `-1`, the process may still be running. Check the observation for its status. By setting `is_input` to `true`, you can:
   - Send empty `command` to retrieve additional logs
   - Send text (set `command` to the text) to STDIN of the running process
   - Send control commands like `C-c` (Ctrl+C), `C-d` (Ctrl+D), or `C-z` (Ctrl+Z) to interrupt the process
@@ -747,7 +709,7 @@ Execution rules:
 ### 环境配置
 
 **容器内环境说明：**
-- 使用 **Poetry** 管理依赖，**micromamba** 管理Python环境
+- **micromamba** 提供 Python 3.12 环境，**Poetry** 创建虚拟环境，镜像构建时通过 **uv** 安装依赖
 - 容器内Python命令需要：`/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run python -c "your_code_here"`
 
 **容器内目录结构：**
@@ -756,8 +718,7 @@ Execution rules:
 ├── code/                   # 应用代码
 │   ├── simple_openhands/   # 源代码
 │   ├── tests/              # 测试代码
-│   ├── pyproject.toml      # Poetry配置
-│   └── poetry.lock         # Poetry锁定文件
+│   └── pyproject.toml      # 项目配置
 ├── workspace/              # 工作目录（挂载点）
 ├── poetry/                 # Poetry虚拟环境
 ├── micromamba/             # micromamba环境
@@ -806,14 +767,14 @@ Event (基础事件类)
 
 **会话环境管理**
 - 基于 tmux 的持久化 shell 环境
-- 支持多会话管理，每个会话有唯一标识
+- 每个运行时实例共享一个 Bash 会话，请求按顺序执行，健康检查可独立响应
 - 支持命令历史记录（限制为10,000条）
 - 支持切换工作目录并通过 PS1 提示符自动检测工作目录变化
 
 **执行控制与监控**
 - 通过 tmux 会话实时获取命令的标准输出和错误输出
 - 支持阻塞和非阻塞模式
-- 提供两种超时机制（无变化超时默认30秒和硬超时可配置）
+- 提供两种超时机制（API 的无输出变化超时为 120 秒，硬超时由 `args.timeout` 设置）
 - 非阻塞模式下自动触发超时防止命令长时间阻塞
 
 **交互与状态管理**
@@ -829,14 +790,14 @@ Event (基础事件类)
 
 **Jupyter Kernel Gateway 集成**
 - 通过 Jupyter Kernel Gateway 执行 Python 代码，基于 Jupyter Kernel 的代码执行环境，支持状态保持
-- 自动启动并使用固定端口（8001）
+- 自动启动，默认在容器内部监听 8001 端口
 
 **智能内核管理**
 - 自动初始化、内核生命周期管理、心跳检测、连接重连
 - 支持 Docker 容器运行模式
 
 **代码执行与输出**
-- 通过 IPythonRunCellAction 执行代码，支持超时设置
+- 对同一内核的调用串行执行，默认每条请求的执行超时为 120 秒
 - 多种输出类型处理（文本、图片PNG、ANSI转义序列清理）
 
 **环境集成与错误处理**
@@ -912,6 +873,8 @@ Event (基础事件类)
 
 ### 测试运行
 
+冒烟测试需要运行中的 API，默认连接容器内的 `http://127.0.0.1:8000`。测试其他实例时，通过 `OH_TEST_API_URL` 指定地址。给容器设置 `OH_API_TOKEN` 后，测试也会检查缺失或错误令牌返回 HTTP 401。请求失败或结果不符会使测试失败。
+
 #### 在容器内运行
 ```bash
 # 进入容器
@@ -927,14 +890,14 @@ cd /simple_openhands/code
 /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests/test_bash_session.py -v
 
 # 或者运行特定测试函数
-/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests/test_bash_session.py::test_bash_session_creation -v
+/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests/test_bash_session.py::test_session_initialization -v
 ```
 
 ### 开发流程
 1. **修改代码**
 2. **停止旧容器**: `docker stop simple-openhands && docker rm simple-openhands`
 3. **构建镜像**: `docker build -t simple-openhands .`
-4. **启动新容器**: `docker run -d --name simple-openhands -p 8000:8000 -p 3000:3000 -p 8001:8001 -v "$(pwd)/workspace:/simple_openhands/workspace" -e WORK_DIR=/simple_openhands/workspace simple-openhands`
+4. **启动新容器**: `docker run -d --name simple-openhands -p 127.0.0.1:8000:8000 -p 127.0.0.1:3000:3000 -v "$(pwd)/workspace:/simple_openhands/workspace" -e WORK_DIR=/simple_openhands/workspace simple-openhands`
 5. **验证修改**: 测试新功能是否正常工作
 
 ### 开发提示

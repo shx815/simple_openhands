@@ -65,6 +65,7 @@ class JupyterKernel:
         self.heartbeat_interval = 10000  # 10 seconds
         self.heartbeat_callback: PeriodicCallback | None = None
         self.initialized = False
+        self.execution_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         await self.execute(r'%colors nocolor')
@@ -83,14 +84,8 @@ class JupyterKernel:
         try:
             self.ws.ping()
             # logging.info('Heartbeat sent...')
-        except tornado.iostream.StreamClosedError:
-            # logging.info('Heartbeat failed, reconnecting...')
-            try:
-                await self._connect()
-            except ConnectionRefusedError:
-                logging.info(
-                    'ConnectionRefusedError: Failed to reconnect to kernel websocket - Is the kernel still running?'
-                )
+        except (tornado.iostream.StreamClosedError, tornado.websocket.WebSocketClosedError):
+            logging.info('Kernel websocket closed. The next execution will reconnect.')
 
     async def _connect(self) -> None:
         if self.ws:
@@ -140,7 +135,13 @@ class JupyterKernel:
         wait=wait_fixed(2),
     )  # type: ignore
     async def execute(
-        self, code: str, timeout: int = 120
+        self, code: str, timeout: float | None = None
+    ) -> dict[str, list[str] | str]:
+        async with self.execution_lock:
+            return await self._execute(code, 120 if timeout is None else timeout)
+
+    async def _execute(
+        self, code: str, timeout: float
     ) -> dict[str, list[str] | str]:
         if not self.ws or self.ws.stream.closed():
             await self._connect()
@@ -175,13 +176,14 @@ class JupyterKernel:
 
         outputs: list[dict] = []
 
-        async def wait_for_messages() -> bool:
-            execution_done = False
-            while not execution_done:
+        async def wait_for_messages() -> None:
+            got_reply = False
+            kernel_idle = False
+            while not (got_reply and kernel_idle):
                 assert self.ws is not None
                 msg = await self.ws.read_message()
                 if msg is None:
-                    continue
+                    raise ConnectionError('Kernel websocket closed during execution')
                 msg_dict = json_decode(msg)
                 msg_type = msg_dict['msg_type']
                 parent_msg_id = msg_dict['parent_header'].get('msg_id', None)
@@ -191,32 +193,29 @@ class JupyterKernel:
 
                 if os.environ.get('DEBUG'):
                     logging.info(
-                        f'MSG TYPE: {msg_type.upper()} DONE:{execution_done}\nCONTENT: {msg_dict["content"]}'
+                        f'MSG TYPE: {msg_type.upper()}\nCONTENT: {msg_dict["content"]}'
                     )
 
                 if msg_type == 'error':
                     traceback = '\n'.join(msg_dict['content']['traceback'])
                     outputs.append({'type': 'text', 'content': traceback})
-                    execution_done = True
                 elif msg_type == 'stream':
                     outputs.append(
                         {'type': 'text', 'content': msg_dict['content']['text']}
                     )
                 elif msg_type in ['execute_result', 'display_data']:
-                    outputs.append(
-                        {
-                            'type': 'text',
-                            'content': msg_dict['content']['data']['text/plain'],
-                        }
-                    )
-                    if 'image/png' in msg_dict['content']['data']:
+                    data = msg_dict['content']['data']
+                    if 'text/plain' in data:
+                        outputs.append({'type': 'text', 'content': data['text/plain']})
+                    if 'image/png' in data:
                         # Store image data in structured format
                         image_url = f'data:image/png;base64,{msg_dict["content"]["data"]["image/png"]}'
                         outputs.append({'type': 'image', 'content': image_url})
 
                 elif msg_type == 'execute_reply':
-                    execution_done = True
-            return execution_done
+                    got_reply = True
+                elif msg_type == 'status' and msg_dict['content']['execution_state'] == 'idle':
+                    kernel_idle = True
 
         async def interrupt_kernel() -> None:
             client = AsyncHTTPClient()
@@ -226,14 +225,25 @@ class JupyterKernel:
                 f'{self.base_url}/api/kernels/{self.kernel_id}/interrupt',
                 method='POST',
                 body=json_encode({'kernel_id': self.kernel_id}),
+                request_timeout=5,
             )
             logging.info(f'Kernel interrupted: {interrupt_response}')
 
+        messages = asyncio.create_task(wait_for_messages())
         try:
-            execution_done = await asyncio.wait_for(wait_for_messages(), timeout)
+            await asyncio.wait_for(asyncio.shield(messages), timeout)
         except asyncio.TimeoutError:
-            await interrupt_kernel()
+            try:
+                await interrupt_kernel()
+                # Let the interrupted request finish before submitting the next cell.
+                await asyncio.wait_for(messages, timeout=5)
+            except Exception:
+                logging.exception('Failed to finish timed-out Jupyter execution')
             return {'text': f'[Execution timed out ({timeout} seconds).]', 'images': []}
+        finally:
+            if not messages.done():
+                messages.cancel()
+                await asyncio.gather(messages, return_exceptions=True)
 
         # Process structured outputs
         text_outputs = []
@@ -245,7 +255,7 @@ class JupyterKernel:
             elif output['type'] == 'image':
                 image_outputs.append(output['content'])
 
-        if not text_outputs and execution_done:
+        if not text_outputs:
             text_content = '[Code executed successfully with no output]'
         else:
             text_content = ''.join(text_outputs)
@@ -257,6 +267,11 @@ class JupyterKernel:
         return {'text': text_content, 'images': image_outputs}
 
     async def shutdown_async(self) -> None:
+        if self.heartbeat_callback:
+            self.heartbeat_callback.stop()
+        if self.ws:
+            self.ws.close()
+            self.ws = None
         if self.kernel_id:
             client = AsyncHTTPClient()
             await client.fetch(
@@ -264,9 +279,6 @@ class JupyterKernel:
                 method='DELETE',
             )
             self.kernel_id = None
-            if self.ws:
-                self.ws.close()
-                self.ws = None
 
 
 class ExecuteHandler(tornado.web.RequestHandler):

@@ -4,6 +4,10 @@
 # 设置错误时退出
 set -e
 
+if ! command -v docker >/dev/null 2>&1 && [ -x "$HOME/.docker/bin/docker" ]; then
+    export PATH="$HOME/.docker/bin:$PATH"
+fi
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -103,11 +107,11 @@ prepare_mounts() {
 start_container() {
     log_info "Starting container..."
     
-    # 启动容器（修复重复挂载点问题）
+    local bind_host=${OH_BIND_HOST:-127.0.0.1}
     docker run -d --name simple-openhands \
-        -p 8000:8000 \
-        -p 3000:3000 \
-        -p 8001:8001 \
+        -p "${bind_host}:8000:8000" \
+        -p 127.0.0.1:3000:3000 \
+        -e OH_API_TOKEN \
         -v "$(pwd)/workspace:/simple_openhands/workspace" \
         -e WORK_DIR=/simple_openhands/workspace \
         simple-openhands
@@ -128,7 +132,8 @@ wait_for_service() {
     local attempt=1
     
     while [ $attempt -le $max_attempts ]; do
-        if curl -s "http://localhost:8000/alive" >/dev/null 2>&1; then
+        if docker exec simple-openhands curl -fsS --max-time 3 http://127.0.0.1:8000/alive 2>/dev/null |
+            grep -q '"bash_session_active":true'; then
             log_success "Service is ready (attempt $attempt/$max_attempts)"
             return 0
         fi
@@ -182,11 +187,12 @@ run_tests() {
     
     # 运行所有测试
     log_info "Running all tests..."
-    if docker exec -it simple-openhands bash -c "cd /simple_openhands/code && /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests -v"; then
+    if docker exec simple-openhands bash -c "cd /simple_openhands/code && /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run pytest tests -v"; then
         log_success "All tests passed!"
     else
-        log_warning "Some tests failed, but continuing..."
+        log_error "Tests failed."
         log_info "You can check test details later with: docker exec -it simple-openhands bash"
+        return 1
     fi
 }
 
@@ -195,13 +201,12 @@ show_usage() {
     log_info "Container is ready for use!"
     echo
     echo "Container ports:"
-    echo "  API: http://localhost:8000"
+    echo "  API port: ${OH_BIND_HOST:-127.0.0.1}:8000"
     echo "  VSCode: http://localhost:3000"
-    echo "  Jupyter: 8001"
     echo "  Workspace: $(pwd)/workspace"
     echo
     echo "Quick test:"
-    echo "  curl http://localhost:8000/alive"
+    echo "  docker exec simple-openhands curl http://127.0.0.1:8000/alive"
     echo
     echo "Useful commands:"
     echo "  View logs:        docker logs -f simple-openhands"
@@ -223,6 +228,12 @@ main() {
         exit 1
     fi
     
+    export OH_API_TOKEN
+    if [[ ${OH_BIND_HOST:-127.0.0.1} != 127.0.0.1 && -z ${OH_API_TOKEN:-} ]]; then
+        log_error "Set OH_API_TOKEN before publishing the API on a non-loopback address."
+        exit 1
+    fi
+
     # 执行各个步骤
     check_docker
     cleanup

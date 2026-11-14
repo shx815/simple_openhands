@@ -3,7 +3,7 @@ Event serialization utilities for simple_openhands.
 Simplified version of OpenHands event serialization.
 """
 
-import json
+import math
 from typing import Any, Dict
 
 from simple_openhands.events.action import (
@@ -90,8 +90,16 @@ def event_from_dict(data: Dict[str, Any]) -> Event:
             
             # OpenHands 标准格式：参数在 args 字段中
             args = data.get('args', {})
-            # 不传递 action 参数，依赖类的默认值（与 OpenHands 一致）
-            return cls(**args)
+            if not isinstance(args, dict):
+                raise ValueError("Action args must be an object")
+            args = args.copy()
+            timeout = args.pop('timeout', None) if action_type in ('run', 'run_ipython') else None
+            event = cls(**args)
+            if timeout is not None:
+                if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+                    raise ValueError("timeout must be a finite positive number")
+                event.set_hard_timeout(timeout, blocking=args.get('blocking', True))
+            return event
         else:
             raise ValueError(f"Unknown action type: {action_type}")
     

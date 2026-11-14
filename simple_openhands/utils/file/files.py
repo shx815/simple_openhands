@@ -70,6 +70,15 @@ def read_lines(all_lines: list[str], start: int = 0, end: int = -1) -> list[str]
         return all_lines[begin:end]
 
 
+def line_range(start: int, end: int) -> slice:
+    """Convert a zero-based, end-exclusive line range to a slice."""
+    if type(start) is not int or type(end) is not int:
+        raise ValueError("start and end must be integers")
+    if start < 0 or (end != -1 and end < start):
+        raise ValueError("Require 0 <= start <= end, or end = -1 for end of file")
+    return slice(start, None if end == -1 else end)
+
+
 async def read_file(
     path: str,
     workdir: str,

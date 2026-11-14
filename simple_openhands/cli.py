@@ -54,13 +54,13 @@ def _find_session_file(start: Path) -> Optional[Path]:
         current = current.parent
 
 
-def cmd_context(api_url: str, raw: bool, timeout: float) -> int:
+def cmd_context(api_url: str, raw: bool, timeout: float, headers: dict[str, str] | None = None) -> int:
     url = api_url.rstrip("/") + "/server_info"
     try:
-        resp = requests.get(url, timeout=timeout)
+        resp = requests.get(url, timeout=timeout, headers=headers)
         if raw:
             print(resp.text)
-            return 0
+            return 0 if resp.ok else 1
         resp.raise_for_status()
         data = resp.json()
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -86,6 +86,7 @@ def main() -> int:
 
     # Resolve routing (flags > env > session file)
     api_url = args.url or _read_env("OH_API_URL")
+    explicit_endpoint = bool(api_url)
 
     if not api_url:
         # Try explicit session file
@@ -107,8 +108,16 @@ def main() -> int:
         _print_error("oh-run: OH_API_URL is not set and --url was not provided. Set OH_API_URL or pass --url.")
         return 2
 
+    headers = {}
+    token = _read_env("OH_API_TOKEN")
+    if token:
+        if not explicit_endpoint:
+            _print_error("oh-run: use --url or OH_API_URL to select an endpoint when sending OH_API_TOKEN.")
+            return 2
+        headers["Authorization"] = f"Bearer {token}"
+
     if args.context:
-        return cmd_context(api_url, raw=args.raw, timeout=args.timeout)
+        return cmd_context(api_url, raw=args.raw, timeout=args.timeout, headers=headers)
 
     if not args.command:
         _print_error("oh-run: no command provided. Example: oh-run \"ls -la\" or oh-run --python \"print('Hello')\"")
@@ -124,8 +133,6 @@ def main() -> int:
 
     # Direct HTTP request (robust, cross-platform)
     url = api_url.rstrip("/") + "/execute_action"
-    headers = {"Content-Type": "application/json"}
-
     try:
         resp = requests.post(url, headers=headers, json={"action": payload["action"]}, timeout=args.timeout)
     except requests.RequestException as e:
@@ -134,16 +141,28 @@ def main() -> int:
 
     # Best-effort output handling
     text = resp.text
-    if args.raw:
-        print(text)
-        return 0 if resp.ok else 1
-
     try:
         data = resp.json()
     except ValueError:
         # Not JSON (server error path) — print as-is
         print(text)
         return 1 if not resp.ok else 0
+    if not isinstance(data, dict):
+        print(text)
+        return 1
+
+    exit_status = 0 if resp.ok else 1
+    extras = data.get("extras", {})
+    if resp.ok and data.get("observation") == "run":
+        remote_exit_code = extras.get("metadata", {}).get("exit_code")
+        if isinstance(remote_exit_code, int):
+            exit_status = remote_exit_code if 0 <= remote_exit_code <= 255 else 1
+    elif data.get("observation") == "error":
+        exit_status = 1
+
+    if args.raw:
+        print(text)
+        return exit_status
 
     # Simple OpenHands observation format: {"observation": "run" or "run_ipython", "content": "...", "extras": {...}}
     content = data.get("content")
@@ -151,17 +170,13 @@ def main() -> int:
         if len(content.strip()) == 0:
             content = "[empty output]"
         print(content)
-        return 0 if resp.ok else 1
-    
-    # Handle image URLs for Python code execution
-    if isinstance(data, dict) and "image_urls" in data.get("args", {}):
-        image_urls = data["args"].get("image_urls")
-        if image_urls:
-            print(f"\nGenerated {len(image_urls)} image(s). Image URLs available in raw JSON output (use --raw to see).")
+    else:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
 
-    # Fallback: pretty print
-    print(json.dumps(data, ensure_ascii=False, indent=2))
-    return 0 if resp.ok else 1
+    image_urls = extras.get("image_urls")
+    if image_urls:
+        print(f"\nGenerated {len(image_urls)} image(s). Image URLs available in raw JSON output (use --raw to see).")
+    return exit_status
 
 
 if __name__ == "__main__":

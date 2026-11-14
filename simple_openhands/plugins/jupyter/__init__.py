@@ -44,29 +44,19 @@ class JupyterPlugin(Plugin):
         is_windows = sys.platform == 'win32'
 
         if not is_local_runtime:
-            # Non-LocalRuntime: 直接以当前用户运行，在 micromamba env + poetry venv 中启动
+            # Run the gateway with the API server's Python interpreter.
             if is_windows:
                 code_repo_path = 'C:\\simple_openhands\\code'  # Windows container path
             else:
                 code_repo_path = '/simple_openhands/code'  # Unix container path
-            poetry_prefix = (
-                        'cd /simple_openhands/code\n'
-        'export POETRY_VIRTUALENVS_PATH=/simple_openhands/poetry;\n'
-        'export PYTHONPATH=/simple_openhands/code:/simple_openhands/code/simple_openhands:$PYTHONPATH;\n'
-        'export MAMBA_ROOT_PREFIX=/simple_openhands/micromamba;\n'
-        '/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run '
-            )
         else:
             # LocalRuntime
-            prefix = ''
             code_repo_path = os.environ.get('SIMPLE_OPENHANDS_REPO_PATH')
             if not code_repo_path:
                 raise ValueError(
                     'SIMPLE_OPENHANDS_REPO_PATH environment variable is not set. '
                     'This is required for the jupyter plugin to work with LocalRuntime.'
                 )
-            # The correct environment is ensured by the PATH in LocalRuntime.
-            poetry_prefix = f'cd {code_repo_path}\n'
 
         if is_windows:
             # Windows-specific command format
@@ -150,36 +140,11 @@ class JupyterPlugin(Plugin):
         else:
             # Unix systems (Linux/macOS)
             # 使用 jupyter kernelgateway（更轻量、更稳定），参考 OpenHands 官方实现
-            jupyter_launch_command = (
-                "/bin/bash << 'EOF'\n"
-                f"{poetry_prefix}"
-                f'"{sys.executable}" -m jupyter kernelgateway '
-                '--KernelGatewayApp.ip=0.0.0.0 '
-                f'--KernelGatewayApp.port={self.kernel_gateway_port}\n'
-                'EOF'
-            )
-            logger.debug(f'Jupyter launch command: {jupyter_launch_command}')
-
-            # Using asyncio.create_subprocess_shell instead of subprocess.Popen
-            # to avoid ASYNC101 linting error
-            self.gateway_process = await asyncio.create_subprocess_shell(
-                jupyter_launch_command,
-                stderr=asyncio.subprocess.STDOUT,
-                stdout=asyncio.subprocess.PIPE,
-            )
-            # read stdout until the kernel gateway is ready
-            output = ''
-            while should_continue() and self.gateway_process.stdout is not None:
-                line_bytes = await self.gateway_process.stdout.readline()
-                line = line_bytes.decode('utf-8')
-                output += line
-                if 'at' in line:
-                    break
-                await asyncio.sleep(1)
-                logger.debug('Waiting for jupyter kernel gateway to start...')
-
-            logger.debug(
-                f'Jupyter kernel gateway started at port {self.kernel_gateway_port}. Output: {output}'
+            self.gateway_process = await asyncio.create_subprocess_exec(
+                sys.executable, '-m', 'kernel_gateway',
+                '--KernelGatewayApp.ip=127.0.0.1',
+                f'--KernelGatewayApp.port={self.kernel_gateway_port}',
+                cwd=os.environ.get('WORK_DIR', code_repo_path),
             )
 
         # 测试Jupyter服务器是否正常工作
@@ -202,7 +167,7 @@ class JupyterPlugin(Plugin):
 
         if not hasattr(self, 'kernel'):
             self.kernel = JupyterKernel(
-                f'localhost:{self.kernel_gateway_port}', self.kernel_id
+                f'127.0.0.1:{self.kernel_gateway_port}', self.kernel_id
             )
 
         if not self.kernel.initialized:
@@ -234,3 +199,24 @@ class JupyterPlugin(Plugin):
                 code=action.code if hasattr(action, 'code') else "unknown",
                 image_urls=None,
             )
+
+    async def close(self) -> None:
+        if hasattr(self, 'kernel'):
+            try:
+                await asyncio.wait_for(self.kernel.shutdown_async(), timeout=3)
+            except Exception as e:
+                logger.warning(f"Failed to shut down Jupyter kernel: {e}")
+
+        process = getattr(self, 'gateway_process', None)
+        if isinstance(process, asyncio.subprocess.Process) and process.returncode is None:
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+            except ProcessLookupError:
+                await process.wait()
+        elif isinstance(process, subprocess.Popen) and process.poll() is None:
+            process.kill()
+            await asyncio.to_thread(process.wait)

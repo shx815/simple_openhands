@@ -48,6 +48,8 @@ ENV PATH="/simple_openhands/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 RUN (if getent passwd 1000 | grep -q pn; then userdel pn; fi) && \
     (if getent passwd 1000 | grep -q ubuntu; then userdel ubuntu; fi)
 
+RUN useradd -m -U -s /bin/bash -u 1000 peter
+
 # Create necessary directories 
 RUN mkdir -p /simple_openhands && \
     mkdir -p /simple_openhands/poetry
@@ -83,22 +85,16 @@ ENV PYTHONPATH=/simple_openhands/code:/simple_openhands/code/simple_openhands
 # 安装依赖和配置环境 (按照 OpenHands 的方式在一个 RUN 中完成)
 RUN \
     # Install project dependencies (包括 server 和 cli extras)
-    /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry install --no-interaction --no-root --extras "server cli" && \
+    venv_python="$(/simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry env info --executable)" && \
+    uv pip install --python "$venv_python" --no-cache --requirement pyproject.toml --extra server --extra cli && \
     # Set environment variables
     /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run python -c "import sys; print('OH_INTERPRETER_PATH=' + sys.executable)" >> /etc/environment && \
     # Set permissions before cleanup
     chmod -R g+rws /simple_openhands/poetry && \
     mkdir -p /simple_openhands/workspace && chmod -R g+rws,o+rw /simple_openhands/workspace && \
     # Clean up cache
-    /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry cache clear --all . -n && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     /simple_openhands/micromamba/bin/micromamba clean --all
-
-# 复制应用代码 (在安装依赖之后复制，避免缓存失效)
-RUN mkdir -p /simple_openhands/code/simple_openhands && \
-    touch /simple_openhands/code/simple_openhands/__init__.py
-COPY --chown=peter:peter --chmod=777 simple_openhands/ /simple_openhands/code/simple_openhands/
-COPY --chown=peter:peter --chmod=777 tests/ /simple_openhands/code/tests/
 
 # ================================================================
 # Setup VSCode Server 
@@ -130,9 +126,8 @@ RUN if [ -z "${RELEASE_TAG}" ]; then \
     cp ${OPENVSCODE_SERVER_ROOT}/bin/remote-cli/openvscode-server ${OPENVSCODE_SERVER_ROOT}/bin/remote-cli/code && \
     rm -f ${RELEASE_TAG}-linux-${arch}.tar.gz
 
-# 创建用户并配置 sudo 权限
-RUN useradd -m -s /bin/bash -u 1000 peter \
-    && echo "peter ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/peter \
+# 配置 peter 的 sudo 权限和目录所有权
+RUN echo "peter ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/peter \
     && chmod 0440 /etc/sudoers.d/peter \
     && chown -R peter:peter /simple_openhands/poetry \
     && chown -R peter:peter /simple_openhands/code \
@@ -159,15 +154,19 @@ RUN chmod -R g+rws,o+rw /simple_openhands/workspace && \
 USER root
 RUN update-ca-certificates
 
+# Copy application sources after the dependency and tooling layers.
+COPY --chown=peter:peter simple_openhands/ /simple_openhands/code/simple_openhands/
+COPY --chown=peter:peter tests/ /simple_openhands/code/tests/
+
 # 切换到用户
 USER peter
 
 # 暴露端口
-EXPOSE 8000 3000 8001
+EXPOSE 8000 3000
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/alive || exit 1
+    CMD curl -fsS http://127.0.0.1:8000/alive | grep -q '"bash_session_active":true'
 
 # 直接使用 Poetry 虚拟环境的 Python
 CMD ["/bin/bash", "-c", "source /etc/environment && /simple_openhands/micromamba/bin/micromamba run -n simple_openhands poetry run python -m simple_openhands.main"]

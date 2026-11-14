@@ -1,150 +1,125 @@
-#!/usr/bin/env python3
-"""
-精简的Python命令测试
-专注于核心功能验证，避免重复和耗时测试
+"""Smoke tests against a running runtime.
+
+Set OH_TEST_API_URL to use a runtime outside the default Linux container.
 """
 
-import subprocess
+import os
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from uuid import uuid4
 
-def run_python_command(command):
-    """运行Python命令并返回结果"""
-    try:
-        result = subprocess.run(
-            ["python", "-c", command],
-            capture_output=True,
-            text=True,
-            timeout=5  # 减少超时时间
-        )
-        return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
-    except Exception as e:
-        return False, "", str(e)
+import pytest
+import requests
+
+from simple_openhands.cli import main
+
+
+API_URL = os.environ.get("OH_TEST_API_URL", "http://127.0.0.1:8000").rstrip("/")
+TOKEN = os.environ.get("OH_API_TOKEN")
+HEADERS = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
+
+
+def execute(action: str, **args) -> dict:
+    response = requests.post(
+        f"{API_URL}/execute_action",
+        json={"action": {"action": action, "args": args}},
+        headers=HEADERS,
+        timeout=70,
+    )
+    response.raise_for_status()
+    return response.json()
+
 
 def test_basic_commands():
-    """测试基础命令 - 核心系统命令"""
-    print("=== 测试基础命令 ===")
-    
-    commands = [
-        {
-            "name": "pwd",
-            "command": "import requests; print(requests.post('http://localhost:8000/execute_action', json={'action': {'action': 'run', 'args': {'command': 'pwd'}}}).json()['content'])",
-            "expected_patterns": ["/simple_openhands/workspace", "/tmp", "/app"]
-        },
-        {
-            "name": "whoami",
-            "command": "import requests; print(requests.post('http://localhost:8000/execute_action', json={'action': {'action': 'run', 'args': {'command': 'whoami'}}}).json()['content'])",
-            "expected_output": "appuser"
-        }
-    ]
-    
-    for cmd in commands:
-        print(f"\n--- {cmd['name']} ---")
-        success, output, error = run_python_command(cmd['command'])
-        if success:
-            print(f"结果: '{output}'")
-            
-            if "expected_patterns" in cmd:
-                matched = any(pattern in output for pattern in cmd["expected_patterns"])
-                if matched:
-                    print(f"✓ 验证通过: 结果匹配预期模式")
-                else:
-                    print(f"✗ 验证失败: 期望匹配 {cmd['expected_patterns']}, 实际结果: '{output}'")
-            else:
-                if cmd["expected_output"] == output:
-                    print(f"✓ 验证通过: 结果完全匹配")
-                else:
-                    print(f"✗ 验证失败: 期望 '{cmd['expected_output']}', 实际结果: '{output}'")
+    info = requests.get(f"{API_URL}/server_info", headers=HEADERS, timeout=5)
+    info.raise_for_status()
+    server = info.json()
+    for command, key in (("pwd", "cwd"), ("whoami", "username")):
+        result = execute("run", command=command)
+        assert result["observation"] == "run"
+        assert result["extras"]["metadata"]["exit_code"] == 0
+        output = result["content"].strip()
+        expected = server[key]
+        if command == "pwd":
+            assert os.path.realpath(output) == os.path.realpath(expected)
         else:
-            print(f"错误: {error}")
+            assert output == expected
+
 
 def test_python_code():
-    """测试Python代码执行 - 核心Jupyter功能"""
-    print("\n=== 测试Python代码执行 ===")
-    
-    commands = [
-        {
-            "name": "print(123)",
-            "command": "import requests; print(requests.post('http://localhost:8000/execute_action', json={'action': {'action': 'run_ipython', 'args': {'code': 'print(123)'}}}).json()['content'])",
-            "expected_output": "123"
-        },
-        {
-            "name": "import os",
-            "command": "import requests; print(requests.post('http://localhost:8000/execute_action', json={'action': {'action': 'run_ipython', 'args': {'code': 'import os; print(os.getcwd())'}}}).json()['content'])",
-            "expected_patterns": ["/simple_openhands/workspace", "/tmp", "/app"]
-        }
-    ]
-    
-    for cmd in commands:
-        print(f"\n--- {cmd['name']} ---")
-        success, output, error = run_python_command(cmd['command'])
-        if success:
-            print(f"结果: '{output}'")
-            
-            if "expected_patterns" in cmd:
-                matched = any(pattern in output for pattern in cmd["expected_patterns"])
-                if matched:
-                    print(f"✓ 验证通过: 结果匹配预期模式")
-                else:
-                    print(f"✗ 验证失败: 期望匹配 {cmd['expected_patterns']}, 实际结果: '{output}'")
-            else:
-                if cmd["expected_output"] == output:
-                    print(f"✓ 验证通过: 结果完全匹配")
-                else:
-                    print(f"✗ 验证失败: 期望 '{cmd['expected_output']}', 实际结果: '{output}'")
-        else:
-            print(f"错误: {error}")
+    result = execute("run_ipython", code="print(123)")
+    assert result["observation"] == "run_ipython"
+    assert result["content"].strip() == "123"
 
-def test_api_endpoints():
-    """测试核心API端点"""
-    print("\n=== 测试API端点 ===")
-    
-    commands = [
-        {
-            "name": "health check",
-            "command": "import requests; print(requests.get('http://localhost:8000/alive').json())",
-            "expected_patterns": ["alive", "bash_session_active", "True"]
-        }
-    ]
-    
-    for cmd in commands:
-        print(f"\n--- {cmd['name']} ---")
-        success, output, error = run_python_command(cmd['command'])
-        if success:
-            print(f"结果: '{output}'")
-            
-            all_patterns_found = all(pattern in output for pattern in cmd["expected_patterns"])
-            if all_patterns_found:
-                print(f"✓ 验证通过: 结果包含所有预期模式")
-            else:
-                missing_patterns = [p for p in cmd["expected_patterns"] if p not in output]
-                print(f"✗ 验证失败: 缺少模式 {missing_patterns}")
-        else:
-            print(f"错误: {error}")
 
-def main():
-    """主函数"""
-    print("开始精简的Python命令测试")
-    print("=" * 50)
-    
-    # 检查服务器状态
-    print("检查服务器状态...")
-    success, output, error = run_python_command(
-        "import requests; print(requests.get('http://localhost:8000/alive').json())"
-    )
-    
-    if not success:
-        print("服务器未运行，请先启动服务器")
-        return
-    
-    print("服务器运行正常，开始测试...")
-    
-    # 运行核心测试
-    test_basic_commands()
-    test_python_code()
-    test_api_endpoints()
-    
-    print("\n" + "=" * 50)
-    print("测试完成")
+def test_parallel_python_commands():
+    def run_cell(value):
+        return execute("run_ipython", code=f"import time; time.sleep(0.2); print({value})")
 
-if __name__ == "__main__":
-    main() 
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(run_cell, [12345, 54321]))
+    assert [result["content"].strip() for result in results] == ["12345", "54321"]
+
+
+def test_python_timeout():
+    result = execute("run_ipython", code="import time; time.sleep(30)", timeout=1)
+    assert "Execution timed out" in result["content"]
+    assert execute("run_ipython", code="print(456)")["content"].strip() == "456"
+
+
+def test_health_check():
+    response = requests.get(f"{API_URL}/alive", timeout=5)
+    response.raise_for_status()
+    assert response.json() == {"status": "alive", "bash_session_active": True}
+
+
+@pytest.mark.skipif(not TOKEN, reason="Runtime is not configured for bearer authentication")
+def test_authentication():
+    for authorization in ({}, {"Authorization": "Bearer invalid"}):
+        response = requests.get(f"{API_URL}/server_info", headers=authorization, timeout=5)
+        assert response.status_code == 401
+    response = requests.get(f"{API_URL}/server_info", headers=HEADERS, timeout=5)
+    assert response.status_code == 200
+
+
+def test_health_check_while_shell_is_busy():
+    marker = f"/tmp/simple-openhands-smoke-{uuid4().hex}"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(execute, "run", command=f"touch {marker} && sleep 4 && rm {marker}")
+        try:
+            # These smoke tests normally run in the same container as the API.
+            if API_URL == "http://127.0.0.1:8000":
+                deadline = time.monotonic() + 3
+                while not Path(marker).exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert Path(marker).exists()
+            response = requests.get(f"{API_URL}/alive", timeout=1)
+            response.raise_for_status()
+            assert not running.done()
+        finally:
+            assert running.result()["extras"]["metadata"]["exit_code"] == 0
+
+
+def test_line_operations_and_edit():
+    path = f"/tmp/simple-openhands-smoke-{uuid4().hex}"
+    try:
+        assert execute("write", path=path, content="a\nb\nc\n")["observation"] == "write"
+        assert execute("read", path=path, start=1, end=2)["content"] == "b\n"
+        assert execute("write", path=path, start=1, end=2, content="B\n")["observation"] == "write"
+        assert execute("read", path=path)["content"] == "a\nB\nc\n"
+        assert execute("edit", path=path, command="str_replace", old_str="B\n", new_str="")["observation"] == "edit"
+        assert execute("edit", path=path, command="str_replace", old_str="B", new_str="d")["observation"] == "error"
+        assert execute("read", path=path)["content"] == "a\nc\n"
+    finally:
+        assert execute("run", command=f"rm -f {path}")["extras"]["metadata"]["exit_code"] == 0
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_cli_returns_remote_exit_code(raw, monkeypatch, capsys):
+    options = ["--raw"] if raw else []
+    command = "bash -c 'exit 17'"
+    monkeypatch.setattr(sys, "argv", ["oh-run", "--url", API_URL, *options, command])
+    assert main() == 17
+    assert capsys.readouterr().out
